@@ -195,9 +195,14 @@ describe('AppModule (e2e)', () => {
     const res = await request(app.getHttpServer())
       .post('/does-not-exist')
       .set('Content-Type', 'application/json')
+      .set('X-Request-Id', 'bad-json-req-1')
       .send('this is not json');
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('validation_failed');
+    // requestId must be echoed in both header and body even when the error
+    // originates from body-parser (which runs before Nest middlewares).
+    expect(res.headers['x-request-id']).toBe('bad-json-req-1');
+    expect(res.body.requestId).toBe('bad-json-req-1');
   });
 
   it('11) pino never logs the Authorization header value', async () => {

@@ -12,9 +12,21 @@ import type { Env } from '../config/env';
 import { JsonDepthMiddleware } from './json-depth.middleware';
 import { RateLimitMiddleware } from './rate-limit.middleware';
 import { ProblemDetailsFilter } from './problem-details.filter';
+import { RequestIdMiddleware } from './request-id.middleware';
 import { setupOpenApi } from './openapi.module';
 
 export function applyEdge(app: INestApplication, env: Env): void {
+  // RequestIdMiddleware MUST run before body parsers so ProblemDetailsFilter
+  // has req.requestId even on body-parser errors (malformed JSON, oversize).
+  const requestIdMw = app.get(RequestIdMiddleware);
+  app.use((req: unknown, res: unknown, next: unknown) =>
+    requestIdMw.use(
+      req as Parameters<RequestIdMiddleware['use']>[0],
+      res as Parameters<RequestIdMiddleware['use']>[1],
+      next as Parameters<RequestIdMiddleware['use']>[2],
+    ),
+  );
+
   app.use(helmet());
   app.use(json({ limit: `${env.BODY_LIMIT_KB}kb` }));
   app.use(urlencoded({ extended: false, limit: `${env.BODY_LIMIT_KB}kb` }));
