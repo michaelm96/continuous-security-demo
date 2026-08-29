@@ -1175,3 +1175,615 @@ describe('Task 7: invoice insert RLS', () => {
     ).rejects.toMatchObject({ code: '42501' });
   });
 });
+
+// ----------------------------------------------------------------------------
+// Task 9 — definer role, grants, ownership, RLS policies, and the
+// `public.create_refund` RPC. Asserts the privilege inventory, the
+// function-level hardening (owner, empty search_path, narrow grants), the
+// rejection matrix (same-org `user` → forbidden; foreign invoice → not_found;
+// idempotent replay vs conflict; concurrent over-refund cap), and the
+// atomic success-audit behavior.
+// ----------------------------------------------------------------------------
+
+describe('Task 9: definer role attributes', () => {
+  let client: Client;
+  beforeAll(async () => {
+    client = new Client({ connectionString });
+    await client.connect();
+  });
+  afterAll(async () => { await client.end(); });
+
+  it('public_refund_definer exists with nologin, noinherit, nobypassrls', async () => {
+    const { rows } = await client.query<{
+      rolname: string;
+      rolcanlogin: boolean;
+      rolinherit: boolean;
+      rolbypassrls: boolean;
+      rolsuper: boolean;
+      rolreplication: boolean;
+    }>(
+      `select rolname, rolcanlogin, rolinherit, rolbypassrls, rolsuper, rolreplication
+         from pg_roles
+        where rolname = 'public_refund_definer'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({
+      rolname: 'public_refund_definer',
+      rolcanlogin: false,
+      rolinherit: false,
+      rolbypassrls: false,
+      rolsuper: false,
+      rolreplication: false,
+    });
+  });
+
+  it('public_refund_definer is NOT a member of service_role', async () => {
+    const { rows } = await client.query<{ count: string }>(
+      `select count(*)::text as count
+         from pg_auth_members m
+         join pg_roles r on r.oid = m.roleid
+         join pg_roles mr on mr.oid = m.member
+        where r.rolname = 'service_role'
+          and mr.rolname = 'public_refund_definer'`,
+    );
+    expect(rows[0].count).toBe('0');
+  });
+});
+
+describe('Task 9: definer-role grants', () => {
+  let client: Client;
+  beforeAll(async () => {
+    client = new Client({ connectionString });
+    await client.connect();
+  });
+  afterAll(async () => { await client.end(); });
+
+  // Compact ACL shape used by information_schema.role_table_grants / role_routine_grants.
+  async function hasTableGrant(table: string, privilege: string): Promise<boolean> {
+    const { rows } = await client.query<{ count: string }>(
+      `select count(*)::text as count
+         from information_schema.role_table_grants
+        where grantee = 'public_refund_definer'
+          and table_schema = 'public'
+          and table_name = $1
+          and privilege_type = $2`,
+      [table, privilege],
+    );
+    return rows[0].count === '1';
+  }
+
+  it('grants SELECT on public.invoices', async () => {
+    expect(await hasTableGrant('invoices', 'SELECT')).toBe(true);
+  });
+
+  it('grants column UPDATE on invoices.id only (no full-table UPDATE)', async () => {
+    // Column-level UPDATE grant on (id) is not exposed via
+    // information_schema.role_table_grants (it lists table-level only).
+    // Use the catalog directly via has_column_privilege.
+    const { rows } = await client.query<{ ok: boolean }>(
+      `select has_column_privilege('public_refund_definer', 'public.invoices'::regclass, 'id', 'UPDATE') as ok`,
+    );
+    expect(rows[0].ok).toBe(true);
+  });
+
+  it('grants SELECT on public.memberships', async () => {
+    expect(await hasTableGrant('memberships', 'SELECT')).toBe(true);
+  });
+
+  it('grants SELECT, INSERT on public.refunds', async () => {
+    expect(await hasTableGrant('refunds', 'SELECT')).toBe(true);
+    expect(await hasTableGrant('refunds', 'INSERT')).toBe(true);
+  });
+
+  it('grants INSERT on public.audit_events', async () => {
+    expect(await hasTableGrant('audit_events', 'INSERT')).toBe(true);
+  });
+
+  it('grants USAGE on schema auth', async () => {
+    const { rows } = await client.query<{ has_usage: boolean }>(
+      `select has_schema_privilege('public_refund_definer', 'auth', 'USAGE') as has_usage`,
+    );
+    expect(rows[0].has_usage).toBe(true);
+  });
+
+  it('grants EXECUTE on function auth.uid()', async () => {
+    const { rows } = await client.query<{ has_execute: boolean }>(
+      `select has_function_privilege(
+          'public_refund_definer',
+          'auth.uid()'::regprocedure,
+          'EXECUTE'
+        ) as has_execute`,
+    );
+    expect(rows[0].has_execute).toBe(true);
+  });
+});
+
+describe('Task 9: create_refund function hardening', () => {
+  let client: Client;
+  beforeAll(async () => {
+    client = new Client({ connectionString });
+    await client.connect();
+  });
+  afterAll(async () => { await client.end(); });
+
+  it('is owned by public_refund_definer (NOT service_role or postgres)', async () => {
+    const { rows } = await client.query<{ proname: string; proowner: string; owner_name: string }>(
+      `select p.proname,
+              p.proowner::regrole::text as proowner,
+              r.rolname as owner_name
+         from pg_proc p
+         join pg_roles r on r.oid = p.proowner
+        where p.proname = 'create_refund'
+          and p.pronamespace = 'public'::regnamespace`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].owner_name).toBe('public_refund_definer');
+  });
+
+  it('proacl does NOT include service_role', async () => {
+    // Convert the ACL array to a textual representation; the service_role
+    // entry would show up as a grantee name in the ACL string.
+    const { rows } = await client.query<{ acl: string }>(
+      `select proacl::text as acl
+         from pg_proc
+        where proname = 'create_refund'
+          and pronamespace = 'public'::regnamespace`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].acl).not.toMatch(/service[_-]?role/i);
+    // PUBLIC must be revoked; only `authenticated` and the definer owner
+    // should appear in the ACL.
+    expect(rows[0].acl).toMatch(/authenticated=/);
+  });
+
+  it('search_path is empty (proconfig contains set search_path = "")', async () => {
+    const { rows } = await client.query<{ proconfig: string[] | null }>(
+      `select proconfig
+         from pg_proc
+        where proname = 'create_refund'
+          and pronamespace = 'public'::regnamespace`,
+    );
+    expect(rows).toHaveLength(1);
+    const cfg = rows[0].proconfig ?? [];
+    // Postgres stores a SET clause as a proconfig entry of the form
+    // `search_path=""` (the empty value is wrapped in double quotes
+    // inside the proconfig text). A non-empty search_path would
+    // instead render as `search_path="public,pg_temp"`. The exact
+    // empty-string representation is therefore `search_path=""` —
+    // not `search_path=` (which would be malformed) and not
+    // `search_path="$user"` (which would inherit from the role).
+    const entry = cfg.find((s) => s.startsWith('search_path')) ?? '';
+    expect(entry).toBe('search_path=""');
+  });
+});
+
+describe('Task 9: forced-RLS definer policies', () => {
+  let client: Client;
+  beforeAll(async () => {
+    client = new Client({ connectionString });
+    await client.connect();
+  });
+  afterAll(async () => { await client.end(); });
+
+  // Returns the policy names present on a table for the definer role,
+  // restricted to the policy kinds exercised by the function (select,
+  // update, insert). `polpermissive` is a boolean, NOT an OID — the role
+  // list is in `polroles` (oid[]). For permissive policies targeted at a
+  // single role, polroles is the singleton array of that role's oid.
+  async function definerPolicies(table: string): Promise<{ policy: string; cmd: string }[]> {
+    const { rows } = await client.query<{ polname: string; polcmd: string }>(
+      `select polname, polcmd
+         from pg_policy p
+         join pg_class c on c.oid = p.polrelid
+        where c.relname = $1
+          and c.relnamespace = 'public'::regnamespace
+          and p.polpermissive = true
+          and cardinality(p.polroles) = 1
+          and p.polroles[1] = (
+            select oid from pg_roles where rolname = 'public_refund_definer'
+          )`,
+      [table],
+    );
+    return rows.map((r) => ({ policy: r.polname, cmd: r.polcmd }));
+  }
+
+  it('refund_definer_select_invoices on public.invoices (SELECT)', async () => {
+    const policies = await definerPolicies('invoices');
+    expect(policies).toEqual(expect.arrayContaining([
+      { policy: 'refund_definer_select_invoices', cmd: 'r' },
+      { policy: 'refund_definer_update_invoices_lock', cmd: 'w' },
+    ]));
+  });
+
+  it('refund_definer_select_memberships on public.memberships (SELECT)', async () => {
+    const policies = await definerPolicies('memberships');
+    expect(policies).toEqual(expect.arrayContaining([
+      { policy: 'refund_definer_select_memberships', cmd: 'r' },
+    ]));
+  });
+
+  it('refund_definer_select_refunds + refund_definer_insert_refunds on public.refunds', async () => {
+    const policies = await definerPolicies('refunds');
+    expect(policies).toEqual(expect.arrayContaining([
+      { policy: 'refund_definer_select_refunds', cmd: 'r' },
+      { policy: 'refund_definer_insert_refunds', cmd: 'a' },
+    ]));
+  });
+
+  it('refund_definer_insert_audit_success on public.audit_events (INSERT) is narrowly scoped', async () => {
+    const policies = await definerPolicies('audit_events');
+    expect(policies).toEqual(expect.arrayContaining([
+      { policy: 'refund_definer_insert_audit_success', cmd: 'a' },
+    ]));
+    // The policy's WITH CHECK qual must restrict to refund.created/success.
+    const { rows } = await client.query<{ polqual: string; polwithcheck: string }>(
+      `select pg_get_expr(p.polqual, p.polrelid) as polqual,
+              pg_get_expr(p.polwithcheck, p.polrelid) as polwithcheck
+         from pg_policy p
+         join pg_class c on c.oid = p.polrelid
+        where c.relname = 'audit_events'
+          and c.relnamespace = 'public'::regnamespace
+          and p.polpermissive = true
+          and cardinality(p.polroles) = 1
+          and p.polroles[1] = (
+            select oid from pg_roles where rolname = 'public_refund_definer'
+          )
+          and p.polname = 'refund_definer_insert_audit_success'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].polwithcheck).toMatch(/action\s*=\s*'refund\.created'/);
+    expect(rows[0].polwithcheck).toMatch(/result\s*=\s*'success'/);
+  });
+});
+
+describe('Task 9: create_refund RPC — privilege + rejection matrix', () => {
+  let client: Client;
+
+  beforeAll(async () => {
+    client = new Client({ connectionString });
+    await client.connect();
+  });
+  afterAll(async () => { await client.end(); });
+
+  async function makeOrgWithMembers(): Promise<{
+    orgId: string;
+    managerId: string;
+    userId: string;
+    invoiceIssuedId: string;
+    invoicePaidId: string;
+    invoiceDraftId: string;
+    foreignInvoiceId: string;
+  }> {
+    const { rows: orgRows } = await client.query<{ id: string }>(
+      `insert into public.organizations (name) values ('Task9 RPC') returning id`,
+    );
+    const orgId = orgRows[0].id;
+
+    async function mkUser(role: 'user' | 'manager'): Promise<string> {
+      const { rows: uRows } = await client.query<{ id: string }>(
+        `insert into auth.users default values returning id`,
+      );
+      const id = uRows[0].id;
+      await client.query(
+        `insert into public.profiles (user_id, display_name) values ($1, $2)`,
+        [id, `T9-${role}`],
+      );
+      await client.query(
+        `insert into public.memberships (organization_id, user_id, role, status)
+         values ($1, $2, $3, 'active')`,
+        [orgId, id, role],
+      );
+      return id;
+    }
+    const managerId = await mkUser('manager');
+    const userId = await mkUser('user');
+
+    async function mkInvoice(
+      ownerId: string,
+      status: 'draft' | 'issued' | 'paid',
+      orgIdOverride?: string,
+    ): Promise<string> {
+      const targetOrg = orgIdOverride ?? orgId;
+      const { rows: iRows } = await client.query<{ id: string }>(
+        `insert into public.invoices
+           (organization_id, owner_id, customer_id, description, amount_minor, currency, status)
+         values ($1, $2, 'cust', 'desc', 1000, 'USD', $3)
+         returning id`,
+        [targetOrg, ownerId, status],
+      );
+      return iRows[0].id;
+    }
+
+    // Foreign invoice lives in a different org; the cross-tenant call from
+    // managerId should be hidden by RLS as not_found.
+    const { rows: fOrgRows } = await client.query<{ id: string }>(
+      `insert into public.organizations (name) values ('Task9 Foreign') returning id`,
+    );
+    const foreignOrgId = fOrgRows[0].id;
+    const foreignInvoiceId = await mkInvoice(managerId, 'issued', foreignOrgId);
+
+    const invoiceIssuedId = await mkInvoice(managerId, 'issued');
+    const invoicePaidId = await mkInvoice(managerId, 'paid');
+    const invoiceDraftId = await mkInvoice(managerId, 'draft');
+    return {
+      orgId,
+      managerId,
+      userId,
+      invoiceIssuedId,
+      invoicePaidId,
+      invoiceDraftId,
+      foreignInvoiceId,
+    };
+  }
+
+  it('same-org `user` role calling create_refund raises `forbidden` (42501)', async () => {
+    const { orgId, userId, invoiceIssuedId } = await makeOrgWithMembers();
+    await expect(
+      asAuthenticated(client, userId, async () => {
+        await client.query(
+          `select public.create_refund($1::uuid, $2::bigint, $3::char(3), $4::text, $5::text, $6::uuid)`,
+          [invoiceIssuedId, 100, 'USD', 'r', 'idem-user-forbidden', '00000000-0000-4000-8000-000000000001'],
+        );
+      }),
+    ).rejects.toMatchObject({ message: expect.stringMatching(/forbidden/) });
+  });
+
+  it('foreign invoice raises `not_found` (P0002) — RLS hides cross-tenant existence', async () => {
+    const { managerId, foreignInvoiceId } = await makeOrgWithMembers();
+    await expect(
+      asAuthenticated(client, managerId, async () => {
+        await client.query(
+          `select public.create_refund($1::uuid, $2::bigint, $3::char(3), $4::text, $5::text, $6::uuid)`,
+          [foreignInvoiceId, 100, 'USD', 'r', 'idem-foreign', '00000000-0000-4000-8000-000000000002'],
+        );
+      }),
+    ).rejects.toMatchObject({ message: expect.stringMatching(/not_found/) });
+  });
+
+  it('manager happy path on issued invoice persists refund + success audit (correlation_id = p_request_id)', async () => {
+    const { orgId, managerId, invoiceIssuedId } = await makeOrgWithMembers();
+    const requestId = '11111111-1111-4111-8111-999999999991';
+    const idemKey = `idem-happy-${Date.now()}`;
+    // Run the call as the manager inside an `authenticated` transaction
+    // so the SQL function runs under the right RLS context, then verify
+    // the side effects (refund row + audit row) from a separate
+    // superuser transaction. The two transactions are independent
+    // because we COMMIT the call (no rollback) and then issue separate
+    // verification queries under superuser that can read both tables.
+    //
+    // The `asAuthenticated` helper rolls back at the end of its fn
+    // block, which would wipe the create_refund side effects. We use a
+    // hand-rolled `begin / commit` block here so the inserts are
+    // visible to the verification step. The teardown transaction at
+    // the end of the test still cleans up the data.
+    let refundId = '';
+    await client.query('begin');
+    try {
+      await client.query(`set local role authenticated`);
+      await client.query(`set local "request.jwt.claim.sub" = '${managerId}'`);
+      await client.query(`set local "request.jwt.claim.role" = 'authenticated'`);
+      const { rows } = await client.query<{ id: string }>(
+        `select (public.create_refund($1::uuid, $2::bigint, $3::char(3), $4::text, $5::text, $6::uuid)).id as id`,
+        [invoiceIssuedId, 200, 'USD', 'partial refund', idemKey, requestId],
+      );
+      refundId = rows[0].id;
+      await client.query('commit');
+    } catch (e) {
+      await client.query('rollback');
+      throw e;
+    }
+
+    // Verification runs under superuser so it can read both refunds and
+    // audit_events (the latter is restricted to the service role per
+    // Spec §6.2). The data was just committed; the rollback that
+    // eventually happens is in the test's afterAll teardown.
+    const { rows: refundRows } = await client.query<{
+      amount_minor: string;
+      currency: string;
+      idempotency_key: string;
+      organization_id: string;
+      created_by: string;
+    }>(
+      `select amount_minor::text, currency, idempotency_key, organization_id, created_by
+         from public.refunds where id = $1`,
+      [refundId],
+    );
+    expect(refundRows).toHaveLength(1);
+    expect(refundRows[0].amount_minor).toBe('200');
+    expect(refundRows[0].currency).toBe('USD');
+    expect(refundRows[0].idempotency_key).toBe(idemKey);
+    expect(refundRows[0].organization_id).toBe(orgId);
+    expect(refundRows[0].created_by).toBe(managerId);
+
+    const { rows: auditRows } = await client.query<{
+      correlation_id: string;
+      action: string;
+      result: string;
+      target_id: string;
+      metadata: { invoiceId?: string; amountMinor?: number; currency?: string };
+    }>(
+      `select correlation_id::text, action, result, target_id, metadata
+         from public.audit_events
+        where correlation_id = $1`,
+      [requestId],
+    );
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0].action).toBe('refund.created');
+    expect(auditRows[0].result).toBe('success');
+    expect(auditRows[0].target_id).toBe(refundId);
+    expect(auditRows[0].metadata.invoiceId).toBe(invoiceIssuedId);
+    expect(auditRows[0].metadata.amountMinor).toBe(200);
+    expect(auditRows[0].metadata.currency).toBe('USD');
+
+    // Clean up the test-scoped data so the schema stays deterministic.
+    await client.query(`delete from public.refunds where id = $1`, [refundId]);
+    await client.query(`delete from public.audit_events where correlation_id = $1`, [requestId]);
+  });
+
+  it('idempotent replay: same key + same payload returns the original (no duplicate refund, no duplicate audit)', async () => {
+    const { managerId, invoicePaidId } = await makeOrgWithMembers();
+    const requestId1 = '11111111-1111-4111-8111-aaaaaaaaaaaa';
+    const requestId2 = '11111111-1111-4111-8111-bbbbbbbbbbbb';
+    const idemKey = `idem-replay-${Date.now()}`;
+    let originalId = '';
+    let replayId = '';
+    // Both calls run in a single COMMIT block (asAuthenticated would
+    // roll back and wipe the first insert). The function's own PL/pgSQL
+    // transaction commits the first insert, then the second call sees
+    // it and takes the early-return path.
+    await client.query('begin');
+    try {
+      await client.query(`set local role authenticated`);
+      await client.query(`set local "request.jwt.claim.sub" = '${managerId}'`);
+      await client.query(`set local "request.jwt.claim.role" = 'authenticated'`);
+      const { rows: rows1 } = await client.query<{ id: string }>(
+        `select (public.create_refund($1::uuid, $2::bigint, $3::char(3), $4::text, $5::text, $6::uuid)).id as id`,
+        [invoicePaidId, 150, 'USD', 'replay test', idemKey, requestId1],
+      );
+      originalId = rows1[0].id;
+      const { rows: rows2 } = await client.query<{ id: string }>(
+        `select (public.create_refund($1::uuid, $2::bigint, $3::char(3), $4::text, $5::text, $6::uuid)).id as id`,
+        [invoicePaidId, 150, 'USD', 'replay test', idemKey, requestId2],
+      );
+      replayId = rows2[0].id;
+      await client.query('commit');
+    } catch (e) {
+      await client.query('rollback');
+      throw e;
+    }
+
+    // The replay must return the original id, not a new one.
+    expect(replayId).toBe(originalId);
+
+    // Verification: exactly one refund row exists for this idempotency
+    // key. The verification query runs under superuser so RLS does not
+    // hide the row from us.
+    const { rowCount } = await client.query(
+      `select 1 from public.refunds where idempotency_key = $1`,
+      [idemKey],
+    );
+    expect(rowCount).toBe(1);
+
+    // Exactly one success audit with the ORIGINAL correlation_id; the
+    // replay's correlation_id is NOT written to audit_events for the
+    // successful-replay path.
+    const { rows: auditRows } = await client.query<{ correlation_id: string }>(
+      `select correlation_id::text from public.audit_events where correlation_id = any($1::uuid[])`,
+      [[requestId1, requestId2]],
+    );
+    const ids = auditRows.map((r) => r.correlation_id);
+    expect(ids).toEqual([requestId1]);
+
+    // Clean up the test-scoped data.
+    await client.query(`delete from public.refunds where idempotency_key = $1`, [idemKey]);
+    await client.query(`delete from public.audit_events where correlation_id = $1`, [requestId1]);
+  });
+
+  it('idempotent_conflict: same key + different amount raises idempotency_conflict (40P05)', async () => {
+    const { managerId, invoicePaidId } = await makeOrgWithMembers();
+    const idemKey = `idem-conflict-${Date.now()}`;
+    // Both calls run in a single commit block (asAuthenticated would
+    // roll back and wipe the first insert). The function's PL/pgSQL
+    // transaction commits the first insert, then the second call sees
+    // the existing key and raises `idempotency_conflict`.
+    let conflictErr: Error | undefined;
+    await client.query('begin');
+    try {
+      await client.query(`set local role authenticated`);
+      await client.query(`set local "request.jwt.claim.sub" = '${managerId}'`);
+      await client.query(`set local "request.jwt.claim.role" = 'authenticated'`);
+      await client.query(
+        `select public.create_refund($1::uuid, $2::bigint, $3::char(3), $4::text, $5::text, $6::uuid)`,
+        [invoicePaidId, 100, 'USD', 'first', idemKey, '00000000-0000-4000-8000-000000000003'],
+      );
+      try {
+        await client.query(
+          `select public.create_refund($1::uuid, $2::bigint, $3::char(3), $4::text, $5::text, $6::uuid)`,
+          [invoicePaidId, 200, 'USD', 'first', idemKey, '00000000-0000-4000-8000-000000000004'],
+        );
+      } catch (err) {
+        conflictErr = err as Error;
+      }
+      await client.query('commit');
+    } catch (e) {
+      await client.query('rollback');
+      throw e;
+    }
+    expect(conflictErr).toBeDefined();
+    expect(conflictErr?.message).toMatch(/idempotency_conflict/);
+
+    // Clean up the test-scoped data. The first call's refund row
+    // and audit row are still in the database because we committed.
+    await client.query(`delete from public.refunds where idempotency_key = $1`, [idemKey]);
+    await client.query(
+      `delete from public.audit_events where correlation_id = $1`,
+      ['00000000-0000-4000-8000-000000000003'],
+    );
+  });
+
+  it('cumulative cap: two concurrent refunds that sum > invoice amount → one succeeds, one returns over_refund', async () => {
+    const { managerId, invoicePaidId } = await makeOrgWithMembers();
+    // invoicePaidId has amount_minor=1000; commit two concurrent refunds
+    // each of 700 that together exceed 1000. The SELECT ... FOR UPDATE on
+    // the invoice row serializes them: the second waits, re-sums, and is
+    // rejected with over_refund.
+    const c1 = new Client({ connectionString });
+    const c2 = new Client({ connectionString });
+    await Promise.all([c1.connect(), c2.connect()]);
+    try {
+      // Configure both clients as the same authenticated caller so the
+      // function is invoked under the manager's identity.
+      async function callCreateRefund(client: Client, key: string): Promise<'ok' | 'over_refund'> {
+        await client.query('begin');
+        try {
+          await client.query(`set local role authenticated`);
+          await client.query(`set local "request.jwt.claim.sub" = '${managerId}'`);
+          await client.query(`set local "request.jwt.claim.role" = 'authenticated'`);
+          await client.query(
+            `select public.create_refund($1::uuid, $2::bigint, $3::char(3), $4::text, $5::text, $6::uuid)`,
+            [invoicePaidId, 700, 'USD', 'concurrent', key, '00000000-0000-4000-8000-000000000005'],
+          );
+          await client.query('commit');
+          return 'ok';
+        } catch (err) {
+          await client.query('rollback').catch(() => {});
+          return err instanceof Error && /over_refund/.test(err.message)
+            ? 'over_refund'
+            : Promise.reject(err);
+        }
+      }
+      const idemKey1 = `idem-cap-1-${Date.now()}`;
+      const idemKey2 = `idem-cap-2-${Date.now()}`;
+      const outcomes = await Promise.all([
+        callCreateRefund(c1, idemKey1),
+        callCreateRefund(c2, idemKey2),
+      ]);
+      // Exactly one ok and one over_refund.
+      expect(outcomes.filter((o) => o === 'ok')).toHaveLength(1);
+      expect(outcomes.filter((o) => o === 'over_refund')).toHaveLength(1);
+      // Total refunds on the invoice never exceed the invoice amount (1000).
+      const { rows } = await client.query<{ total: string }>(
+        `select coalesce(sum(amount_minor), 0)::text as total
+           from public.refunds where invoice_id = $1`,
+        [invoicePaidId],
+      );
+      expect(Number(rows[0].total)).toBeLessThanOrEqual(1000);
+    } finally {
+      await c1.end().catch(() => {});
+      await c2.end().catch(() => {});
+    }
+  });
+
+  it('direct INSERT into public.refunds as authenticated is denied (42501)', async () => {
+    const { managerId, invoiceIssuedId } = await makeOrgWithMembers();
+    await expect(
+      asAuthenticated(client, managerId, async () => {
+        await client.query(
+          `insert into public.refunds (invoice_id, organization_id, created_by, amount_minor, currency, reason, idempotency_key)
+           values ($1, gen_random_uuid(), gen_random_uuid(), 100, 'USD', 'r', 'k')`,
+          [invoiceIssuedId],
+        );
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+});

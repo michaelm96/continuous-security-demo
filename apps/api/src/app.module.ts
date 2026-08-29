@@ -6,13 +6,14 @@ import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { InvoicesModule } from './invoices/invoices.module';
+import { RefundsModule } from './refunds/refunds.module';
 import { HealthModule } from './health/health.module';
 
 // Order matters: AuditModule before AuthModule (AuthGuard depends on
 // AuditService). DatabaseModule before AuthModule (MeService depends on
-// CALLER_CLIENT). OrganizationsModule before InvoicesModule (InvoiceService
-// depends on MembershipService). HealthModule is self-contained (it owns
-// its PG_POOL).
+// CALLER_CLIENT). OrganizationsModule before InvoicesModule and before
+// RefundsModule (both InvoiceService and RefundService depend on
+// MembershipService). HealthModule is self-contained (it owns its PG_POOL).
 @Module({
   imports: [
     ConfigModule,
@@ -22,6 +23,7 @@ import { HealthModule } from './health/health.module';
     AuthModule,
     OrganizationsModule,
     InvoicesModule,
+    RefundsModule,
     HealthModule,
   ],
 })
