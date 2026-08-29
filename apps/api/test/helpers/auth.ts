@@ -17,6 +17,7 @@ import type { SeedIdentity } from './seed-identities';
 import { withTransaction } from './db';
 
 const FALLBACK_SECRET = 'test-only-jwt-secret-32-bytes-min-len-please';
+const FALLBACK_ISSUER = 'http://127.0.0.1:54321';
 
 function secretBytes(): Uint8Array {
   const raw = process.env.SUPABASE_JWT_SECRET ?? FALLBACK_SECRET;
@@ -26,8 +27,20 @@ function secretBytes(): Uint8Array {
   return new TextEncoder().encode(raw);
 }
 
+function issuerString(): string {
+  // Forced deviation (Tasks 6/7): signIn previously omitted the `iss` claim
+  // entirely, so JwtVerifier (which requires `iss === env.SUPABASE_JWT_ISSUER`)
+  // rejected every minted token and AuthGuard returned 503 audit_unavailable
+  // before any DTO/controller code could run. The Task 5 /me tests work around
+  // this by accepting [200, 503]. Task 6/7 e2e DTO and authorization tests
+  // require the JWT to actually verify — adding the issuer mirrors mintTestToken
+  // and unblocks those assertions.
+  return process.env.SUPABASE_JWT_ISSUER ?? FALLBACK_ISSUER;
+}
+
 export async function signIn(identity: SeedIdentity): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
+  const issuer = issuerString();
   return new SignJWT({
     role: identity.role,
     aud: 'authenticated',
@@ -42,6 +55,7 @@ export async function signIn(identity: SeedIdentity): Promise<string> {
     .setIssuedAt(now)
     .setExpirationTime(now + 3600)
     .setAudience('authenticated')
+    .setIssuer(issuer)
     .sign(secretBytes());
 }
 

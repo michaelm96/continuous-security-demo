@@ -26,5 +26,13 @@ import { MeService } from './me.service';
     AuthGuard,
     MeService,
   ],
+  // Export AuthGuard + JwtVerifier so downstream modules (OrganizationsModule
+  // in Task 6, InvoicesModule in Task 7) can apply @UseGuards(AuthGuard) on
+  // their controllers and have Nest resolve AuthGuard's JwtVerifier
+  // dependency from this module. AuditService is intentionally NOT exported:
+  // it is re-provided by AuditModule itself, and domain modules import
+  // AuditModule to inject AuditService directly (not transitively via
+  // AuthModule).
+  exports: [AuthGuard, JwtVerifier],
 })
 export class AuthModule {}

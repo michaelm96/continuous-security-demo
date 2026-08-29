@@ -26,7 +26,7 @@ import { AppModule } from '../src/app.module';
 import { applyEdge } from '../src/common/bootstrap-app';
 import { loadEnv } from '../src/config/env';
 import { mintTestToken, signIn } from './helpers/auth';
-import { SEED_IDENTITIES } from './helpers/seed-identities';
+import { SEED_IDENTITIES, SEED_IDS } from './helpers/seed-identities';
 
 const HAS_DB = !!process.env.DATABASE_URL;
 
@@ -303,6 +303,133 @@ describe('AppModule (e2e)', () => {
       if (res.status === 200) {
         expect(Array.isArray(res.body.memberships)).toBe(true);
       }
+    });
+  });
+
+  // ===========================================================================
+  // Task 6 — Organizations + Memberships. Step 1 RED. Step 2+ GREEN wires
+  // OrganizationsModule.
+  //
+  // In the dev env (fake SUPABASE_URL — no PostgREST) the underlying
+  // caller-scoped Supabase queries fail. The brief's forced context
+  // (Adaptations 2/3 from task-5-report.md) accepts this and expects
+  // either 200/404/403 on the happy/sad data paths or 503 audit_unavailable
+  // when audit persistence is the failure point. These e2e tests therefore
+  // verify the HTTP contracts that DO work without a real DB: DTO validation
+  // (rejects unknown fields and missing values), Problem Details shape, and
+  // the route being mounted. The actual data access is exercised by the
+  // Task 6 RLS suite in test/schema.rls-spec.ts.
+  // ===========================================================================
+  describe('Task 6: PATCH /organizations/:organizationId/members/:userId DTO validation', () => {
+    it('rejects empty body {} as 400 validation_failed', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+      const res = await request(app.getHttpServer())
+        .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({});
+      // DTO validation runs before any controller logic, so this is always
+      // 400 in this env (DB never queried).
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('validation_failed');
+      expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
+      expect(res.body.requestId).toBeDefined();
+      expect(res.body.status).toBe(400);
+      expect(res.body.title).toBe('Validation Failed');
+    });
+
+    it('rejects synthetic { atLeastOne: true } field as unknown 400 validation_failed', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+      const res = await request(app.getHttpServer())
+        .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ atLeastOne: true });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('validation_failed');
+    });
+
+    it('rejects authority mass assignment { actor: ..., organization: ..., status: "user" } as 400', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+      const res = await request(app.getHttpServer())
+        .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ actor: SEED_IDS.alphaAdmin, organization: 'root', role: 'user' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('validation_failed');
+    });
+
+    it('rejects role outside the whitelist ("superuser") as 400 validation_failed', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+      const res = await request(app.getHttpServer())
+        .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ role: 'superuser' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('validation_failed');
+    });
+
+    it('rejects status outside the whitelist ("deleted") as 400 validation_failed', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+      const res = await request(app.getHttpServer())
+        .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: 'deleted' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('validation_failed');
+    });
+
+    it('accepts { role: "manager" } alone (passes DTO; downstream may return 404/403/503 in dev)', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+      const res = await request(app.getHttpServer())
+        .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ role: 'manager' });
+      // DTO accepted; downstream behavior in the fake-Supabase dev env
+      // depends on whether audit + DB query succeed.
+      expect([200, 404, 403, 409, 503]).toContain(res.status);
+      if (res.status === 200) {
+        expect(res.body.role).toBe('manager');
+      }
+    });
+
+    it('accepts { status: "suspended" } alone (passes DTO)', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+      const res = await request(app.getHttpServer())
+        .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: 'suspended' });
+      expect([200, 404, 403, 409, 503]).toContain(res.status);
+      if (res.status === 200) {
+        expect(res.body.status).toBe('suspended');
+      }
+    });
+  });
+
+  describe('Task 6: organization routes mounted', () => {
+    it('GET /organizations route exists (rejects anonymous as 401 or audit-fail 503)', async () => {
+      const res = await request(app.getHttpServer()).get('/organizations');
+      // Route mounted: 401 (missing token) or 503 (audit fails in dev).
+      // If route did NOT exist, this would be 404 not_found.
+      expect([401, 503]).toContain(res.status);
+      expect(['unauthenticated', 'audit_unavailable']).toContain(res.body.code);
+    });
+
+    it('GET /organizations/:organizationId/members route exists', async () => {
+      const res = await request(app.getHttpServer()).get(
+        `/organizations/${SEED_IDS.alphaOrg}/members`,
+      );
+      expect([401, 503]).toContain(res.status);
+      expect(['unauthenticated', 'audit_unavailable']).toContain(res.body.code);
+    });
+
+    it('PATCH /organizations/:organizationId/members/:userId route exists', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
+        .send({ role: 'manager' });
+      // Anonymous PATCH: 401 (auth fail) or 503 (audit fail). The route is
+      // mounted because DTO validation does NOT run for unauthenticated
+      // requests — the AuthGuard runs first.
+      expect([401, 503]).toContain(res.status);
+      expect(['unauthenticated', 'audit_unavailable']).toContain(res.body.code);
     });
   });
 });

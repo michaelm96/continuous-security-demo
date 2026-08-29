@@ -97,6 +97,32 @@ export class ProblemDetailsFilter implements ExceptionFilter {
         res.status(pd.status).json(pd);
         return;
       }
+      if (status === 409) {
+        // 409 can mean last_admin (Task 6), invalid_state (Task 2 trigger),
+        // idempotency_conflict / over_refund (Task 9), or validation_failed
+        // for same-key conflicts. Trust the explicit code from the exception
+        // body when present.
+        const code =
+          typeof body === 'object' &&
+          body !== null &&
+          'code' in body &&
+          typeof (body as { code: unknown }).code === 'string'
+            ? ((body as { code: string }).code)
+            : 'invalid_state';
+        const codeKey =
+          code === 'last_admin'
+            ? 'LAST_ADMIN'
+            : code === 'idempotency_conflict'
+              ? 'IDEMPOTENCY_CONFLICT'
+              : code === 'over_refund'
+                ? 'OVER_REFUND'
+                : code === 'validation_failed'
+                  ? 'VALIDATION_FAILED'
+                  : 'INVALID_STATE';
+        const pd = problemDetails(codeKey, requestId, detail);
+        res.status(pd.status).json(pd);
+        return;
+      }
       if (status === 503) {
         // 503 can mean audit_unavailable (Task 5 AuthGuard) or
         // dependency_unavailable (Task 4 HealthService). Trust the explicit

@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process';
 import { Client } from 'pg';
 import { SEED_IDENTITIES, SEED_IDS } from './helpers/seed-identities';
-import { signIn, visibleInvoiceIds } from './helpers/auth';
+import { signIn, visibleInvoiceIds, decodeAccessToken } from './helpers/auth';
 import { closePool } from './helpers/db';
 
 const connectionString = process.env.SUPABASE_DB_URL ?? process.env.DATABASE_URL;
@@ -465,5 +465,314 @@ describe('seed visibility (Task 3)', () => {
 
   afterAll(async () => {
     await closePool();
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Task 6 — organizations + memberships + last-admin enforcement.
+// Exercises the existing RLS policies (memberships_select_self,
+// memberships_select_tenant, memberships_update_admin) and the
+// enforce_last_admin() trigger under real Postgres role + JWT claims.
+// ----------------------------------------------------------------------------
+
+describe('Task 6: organization membership reads', () => {
+  let client: Client;
+  beforeAll(async () => {
+    client = new Client({ connectionString });
+    await client.connect();
+  });
+  afterAll(async () => { await client.end(); });
+
+  it('active admin sees own organization row in public.organizations', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+    const claims = await decodeAccessToken(token);
+    await asAuthenticated(client, claims.sub, async () => {
+      const { rows } = await client.query<{ id: string; name: string }>(
+        `select id, name from public.organizations where id = $1`,
+        [SEED_IDS.alphaOrg],
+      );
+      expect(rows).toEqual([{ id: SEED_IDS.alphaOrg, name: 'Alpha' }]);
+    });
+  });
+
+  it('active admin of Alpha sees only Alpha memberships in own tenant', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+    const claims = await decodeAccessToken(token);
+    await asAuthenticated(client, claims.sub, async () => {
+      const { rows } = await client.query<{ user_id: string; organization_id: string }>(
+        `select user_id, organization_id
+           from public.memberships
+          where organization_id = $1
+          order by user_id asc`,
+        [SEED_IDS.alphaOrg],
+      );
+      // All 5 Alpha memberships visible (the suspended one too — that's the
+      // members list endpoint's job to filter by RLS visibility, not ours).
+      const userIds = rows.map((r) => r.user_id).sort();
+      expect(userIds).toEqual(
+        [
+          SEED_IDS.alphaAdmin,
+          SEED_IDS.alphaManager,
+          SEED_IDS.alphaSuspended,
+          SEED_IDS.alphaUserA,
+          SEED_IDS.alphaUserB,
+        ].sort(),
+      );
+    });
+  });
+
+  it('cross-tenant membership SELECT returns 0 rows (RLS hides foreign tenant)', async () => {
+    const token = await signIn(SEED_IDENTITIES.betaAdmin);
+    const claims = await decodeAccessToken(token);
+    await asAuthenticated(client, claims.sub, async () => {
+      const { rows } = await client.query<{ id: string }>(
+        `select id from public.memberships where organization_id = $1`,
+        [SEED_IDS.alphaOrg],
+      );
+      expect(rows).toEqual([]);
+    });
+  });
+
+  it('memberships_select_self returns caller own row even when suspended', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaSuspended);
+    const claims = await decodeAccessToken(token);
+    await asAuthenticated(client, claims.sub, async () => {
+      // The self-select policy must return the suspended row so the Nest
+      // layer can distinguish a known suspended caller (403) from a missing
+      // membership (404).
+      const { rows } = await client.query<{ user_id: string; status: string }>(
+        `select user_id, status
+           from public.memberships
+          where organization_id = $1 and user_id = $2`,
+        [SEED_IDS.alphaOrg, SEED_IDS.alphaSuspended],
+      );
+      expect(rows).toEqual([
+        { user_id: SEED_IDS.alphaSuspended, status: 'suspended' },
+      ]);
+    });
+  });
+});
+
+describe('Task 6: membership updates + last-admin trigger', () => {
+  let client: Client;
+  beforeAll(async () => {
+    client = new Client({ connectionString });
+    await client.connect();
+  });
+  afterAll(async () => { await client.end(); });
+
+  async function createOrgWithAdmin(
+    role: 'user' | 'manager' | 'organization_admin',
+  ): Promise<{ orgId: string; userId: string }> {
+    const { rows: orgRows } = await client.query<{ id: string }>(
+      `insert into public.organizations (name) values ('Task6 Org') returning id`,
+    );
+    const orgId = orgRows[0].id;
+    const { rows: userRows } = await client.query<{ id: string }>(
+      `insert into auth.users default values returning id`,
+    );
+    const userId = userRows[0].id;
+    await client.query(
+      `insert into public.profiles (user_id, display_name) values ($1, $2)`,
+      [userId, `T6 ${role}`],
+    );
+    await client.query(
+      `insert into public.memberships (organization_id, user_id, role, status)
+       values ($1, $2, $3, 'active')`,
+      [orgId, userId, role],
+    );
+    return { orgId, userId };
+  }
+
+  it('active organization_admin can update another membership in same tenant', async () => {
+    const { orgId, userId: adminId } = await createOrgWithAdmin('organization_admin');
+    const { userId: targetUserId } = await createOrgWithAdmin('user');
+    // Add targetUserId to the admin's org as a plain user.
+    await client.query(
+      `insert into public.memberships (organization_id, user_id, role, status)
+       values ($1, $2, 'user', 'active')`,
+      [orgId, targetUserId],
+    );
+    await asAuthenticated(client, adminId, async () => {
+      const { rowCount } = await client.query(
+        `update public.memberships set role = 'manager'
+          where organization_id = $1 and user_id = $2`,
+        [orgId, targetUserId],
+      );
+      expect(rowCount).toBe(1);
+      // Verify the change is visible within the same transaction.
+      const { rows } = await client.query<{ role: string }>(
+        `select role from public.memberships
+          where organization_id = $1 and user_id = $2`,
+        [orgId, targetUserId],
+      );
+      expect(rows[0].role).toBe('manager');
+    });
+  });
+
+  it('user role UPDATE in own tenant is silently filtered by RLS (rowCount=0)', async () => {
+    const { orgId, userId } = await createOrgWithAdmin('user');
+    const { userId: targetId } = await createOrgWithAdmin('user');
+    await client.query(
+      `insert into public.memberships (organization_id, user_id, role, status)
+       values ($1, $2, 'user', 'active')`,
+      [orgId, targetId],
+    );
+    await asAuthenticated(client, userId, async () => {
+      // memberships_update_admin USING requires 'organization_admin'; a 'user'
+      // caller fails the predicate, so the WHERE clause matches 0 rows.
+      // UPDATE returns success but no rows change. RLS does NOT throw — it
+      // filters. The Nest layer is the first defense (it 403s on role).
+      const { rowCount } = await client.query(
+        `update public.memberships set role = 'manager'
+          where organization_id = $1 and user_id = $2`,
+        [orgId, targetId],
+      );
+      expect(rowCount).toBe(0);
+    });
+    const { rows } = await client.query<{ role: string }>(
+      `select role from public.memberships
+        where organization_id = $1 and user_id = $2`,
+      [orgId, targetId],
+    );
+    expect(rows[0].role).toBe('user');
+  });
+
+  it('suspended caller UPDATE is silently filtered by RLS (rowCount=0)', async () => {
+    const { orgId, userId: adminId } = await createOrgWithAdmin('organization_admin');
+    const { userId: suspendedId } = await createOrgWithAdmin('user');
+    // Move suspendedId into the admin's org and suspend them there.
+    await client.query(
+      `delete from public.memberships where user_id = $1`,
+      [suspendedId],
+    );
+    await client.query(
+      `insert into public.memberships (organization_id, user_id, role, status)
+       values ($1, $2, 'user', 'suspended')`,
+      [orgId, suspendedId],
+    );
+    void adminId;
+    await asAuthenticated(client, suspendedId, async () => {
+      const { rowCount } = await client.query(
+        `update public.memberships set status = 'active'
+          where organization_id = $1 and user_id = $2`,
+        [orgId, suspendedId],
+      );
+      expect(rowCount).toBe(0);
+    });
+  });
+
+  it('cross-tenant UPDATE via RLS-context returns 0 rows (RLS hides foreign tenant before any check)', async () => {
+    const { orgId: foreignOrg } = await createOrgWithAdmin('organization_admin');
+    const { userId: foreignAdmin } = await createOrgWithAdmin('user');
+    await client.query(
+      `update public.memberships set organization_id = $1, user_id = $2
+       where organization_id = $1 and user_id = $2`,
+      [foreignOrg, foreignAdmin],
+    );
+    void foreignAdmin;
+    // Active admin in their own org tries to update a membership in foreign
+    // org. RLS hides the foreign row, so UPDATE matches 0 rows; client sees
+    // success but row unchanged.
+    const { orgId: ownOrg } = await createOrgWithAdmin('organization_admin');
+    const { rows: ownAdminRows } = await client.query<{ user_id: string }>(
+      `select user_id from public.memberships
+        where organization_id = $1 and role = 'organization_admin'`,
+      [ownOrg],
+    );
+    const ownAdminId = ownAdminRows[0].user_id;
+    await asAuthenticated(client, ownAdminId, async () => {
+      const { rowCount } = await client.query(
+        `update public.memberships set role = 'manager'
+          where organization_id = $1`,
+        [foreignOrg],
+      );
+      expect(rowCount).toBe(0);
+    });
+  });
+
+  it('final-admin self-demotion blocked by enforce_last_admin() trigger', async () => {
+    const { orgId, userId } = await createOrgWithAdmin('organization_admin');
+    await expect(
+      client.query(
+        `update public.memberships set role = 'manager'
+          where organization_id = $1 and user_id = $2`,
+        [orgId, userId],
+      ),
+    ).rejects.toMatchObject({ message: expect.stringMatching(/last_admin/) });
+  });
+
+  it('final-admin self-suspension blocked by enforce_last_admin() trigger', async () => {
+    const { orgId, userId } = await createOrgWithAdmin('organization_admin');
+    await expect(
+      client.query(
+        `update public.memberships set status = 'suspended'
+          where organization_id = $1 and user_id = $2`,
+        [orgId, userId],
+      ),
+    ).rejects.toMatchObject({ message: expect.stringMatching(/last_admin/) });
+  });
+
+  it('two-admin race: exactly one demotion succeeds, the other raises last_admin', async () => {
+    const { orgId } = await createOrgWithAdmin('organization_admin');
+    const { userId: secondAdmin } = await createOrgWithAdmin('organization_admin');
+    await client.query(
+      `insert into public.memberships (organization_id, user_id, role, status)
+       values ($1, $2, 'organization_admin', 'active')`,
+      [orgId, secondAdmin],
+    );
+    const { rows: aRows } = await client.query<{ user_id: string }>(
+      `select user_id from public.memberships
+        where organization_id = $1 and role = 'organization_admin' and status = 'active'
+        order by user_id asc limit 1`,
+      [orgId],
+    );
+    const firstAdmin = aRows[0].user_id;
+    const otherAdmin =
+      firstAdmin === secondAdmin
+        ? (await client.query<{ user_id: string }>(
+            `select user_id from public.memberships
+              where organization_id = $1 and role = 'organization_admin' and status = 'active'
+              order by user_id desc limit 1`,
+            [orgId],
+          )).rows[0].user_id
+        : secondAdmin;
+
+    // Run both demotions in two separate pg clients in parallel; one must
+    // succeed, the other must fail with last_admin (P0001).
+    const c1 = new Client({ connectionString });
+    const c2 = new Client({ connectionString });
+    await Promise.all([c1.connect(), c2.connect()]);
+    try {
+      const tx1 = c1
+        .query('begin')
+        .then(() => c1.query(`update public.memberships set role = 'manager' where user_id = $1`, [firstAdmin]))
+        .then(() => c1.query('commit'))
+        .then(() => 'ok' as const)
+        .catch((err: unknown) => {
+          void c1.query('rollback').catch(() => {});
+          return err instanceof Error && /last_admin/.test(err.message)
+            ? ('last_admin' as const)
+            : Promise.reject(err);
+        });
+      const tx2 = c2
+        .query('begin')
+        .then(() => c2.query(`update public.memberships set role = 'manager' where user_id = $1`, [otherAdmin]))
+        .then(() => c2.query('commit'))
+        .then(() => 'ok' as const)
+        .catch((err: unknown) => {
+          void c2.query('rollback').catch(() => {});
+          return err instanceof Error && /last_admin/.test(err.message)
+            ? ('last_admin' as const)
+            : Promise.reject(err);
+        });
+      const outcomes = await Promise.all([tx1, tx2]);
+      // Exactly one ok and one last_admin.
+      expect(outcomes.filter((o) => o === 'ok')).toHaveLength(1);
+      expect(outcomes.filter((o) => o === 'last_admin')).toHaveLength(1);
+    } finally {
+      await c1.end().catch(() => {});
+      await c2.end().catch(() => {});
+    }
   });
 });
