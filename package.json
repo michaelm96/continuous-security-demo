@@ -13,8 +13,9 @@
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test:unit -w @continuous-security-demo/api && npm run test:rls -w @continuous-security-demo/api && npm run test:e2e -w @continuous-security-demo/api",
-    "supabase:start": "supabase start",
-    "supabase:reset": "supabase db reset"
+    "db:setup": "bash apps/api/test/setup-test-db.sh setup",
+    "db:reset": "bash apps/api/test/setup-test-db.sh reset",
+    "db:psql": "PGHOST=/tmp PGDATABASE=continuous_security_demo /Applications/Postgres.app/Contents/Versions/latest/bin/psql"
   },
   "devDependencies": {
     "supabase": "2.116.0"
