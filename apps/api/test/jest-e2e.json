@@ -5,5 +5,7 @@
   "testRegex": ".e2e-spec.ts$",
   "transform": {
     "^.+\\.(t|j)s$": "@swc/jest"
-  }
+  },
+  "transformIgnorePatterns": ["node_modules/(?!(@nestjs|@swc|jose)/)"],
+  "setupFiles": ["<rootDir>/test/setup-env.ts"]
 }

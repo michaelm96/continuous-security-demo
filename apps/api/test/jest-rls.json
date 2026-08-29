@@ -4,5 +4,6 @@
   "testEnvironment": "node",
   "testRegex": ".*\\.rls-spec\\.ts$",
   "transform": { "^.+\\.(t|j)s$": "@swc/jest" },
-  "transformIgnorePatterns": ["node_modules/(?!(jose)/)"]
+  "transformIgnorePatterns": ["node_modules/(?!(jose)/)"],
+  "setupFiles": ["<rootDir>/test/setup-env.ts"]
 }
