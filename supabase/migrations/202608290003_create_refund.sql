@@ -33,6 +33,10 @@ do $$ begin
   end if;
 end $$;
 
+-- Local resets preserve cluster roles while recreating application schemas.
+-- Re-assert the approved security attributes on every migration run.
+alter role public_refund_definer nologin noinherit nobypassrls;
+
 -- ---------------------------------------------------------------------------
 -- 2. Drop and recreate the function with the exact Spec §6.3 body. Drop is
 --    idempotent; the next `create function` carries the security-definer
@@ -202,19 +206,35 @@ grant execute on function auth.uid() to public_refund_definer;
 -- ---------------------------------------------------------------------------
 -- 4. Transfer function ownership to the definer role (required for the
 --    SECURITY DEFINER execution path to actually run with `public_refund_definer`
---    privileges). The definer role owns no other object.
+--    privileges). Supabase migrations run as a CREATEROLE account rather than
+--    a superuser, so PostgreSQL requires temporary membership in the new owner.
+--    It is revoked immediately; a migration error rolls the grant back.
 -- ---------------------------------------------------------------------------
+do $$ begin
+  execute format('grant public_refund_definer to %I', current_user);
+end $$;
+grant create on schema public to public_refund_definer;
+
 alter function public.create_refund(uuid, bigint, char(3), text, text, uuid)
   owner to public_refund_definer;
 
--- ---------------------------------------------------------------------------
--- 5. REVOKE PUBLIC execute; GRANT EXECUTE to `authenticated` only. Without
---    this, every role inherits EXECUTE via the implicit PUBLIC grant.
--- ---------------------------------------------------------------------------
+-- Keep temporary membership until the new owner's ACL is reduced. Without
+-- this ordering PostgreSQL only warns that the migration role cannot revoke
+-- privileges, leaving the platform defaults for anon and service_role intact.
 revoke all on function public.create_refund(uuid, bigint, char(3), text, text, uuid)
-  from public;
+  from public, anon, authenticated, service_role;
 grant execute on function public.create_refund(uuid, bigint, char(3), text, text, uuid)
   to authenticated;
+
+revoke create on schema public from public_refund_definer;
+do $$ begin
+  execute format('revoke public_refund_definer from %I', current_user);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 5. EXECUTE is granted to `authenticated` only. The ACL reduction occurs
+--    above while the migration role is temporarily a member of the owner.
+-- ---------------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------------
 -- 6. Six forced-RLS policies targeted to `public_refund_definer`. The role

@@ -16,8 +16,8 @@
     "typecheck": "tsc --noEmit",
     "test:unit": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand --testPathIgnorePatterns=/test/",
     "test:rls": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand --config test/jest-rls.json",
-    "db:seed": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f test/sql/000_auth_stub.sql && psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f test/sql/003_seed.sql",
-    "db:reset": "npm run db:seed -w @continuous-security-demo/api"
+    "db:seed": "cd ../.. && npm run supabase:reset",
+    "db:reset": "npm run db:seed"
   },
   "dependencies": {
     "@nestjs/common": "12.0.1",

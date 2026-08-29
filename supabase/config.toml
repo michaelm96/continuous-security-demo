@@ -1,0 +1,37 @@
+project_id = "continuous-security-demo"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[db.migrations]
+enabled = true
+schema_paths = []
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+signing_keys_path = "./signing_keys.json"
+enable_signup = false
+
+[auth.email]
+# The provider must be enabled for seeded password sign-in. Top-level
+# `auth.enable_signup = false` still prevents public registration.
+enable_signup = true
+enable_confirmations = false

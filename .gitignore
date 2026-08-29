@@ -5,4 +5,7 @@ coverage/
 .env
 .env.local
 supabase/.temp/
+supabase/.branches/
+supabase/signing_keys.json
+supabase/.signing_keys.*
 *.tsbuildinfo
