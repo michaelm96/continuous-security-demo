@@ -12,7 +12,7 @@ function SubmitButton() {
     <button
       type="submit"
       disabled={pending}
-      className="rounded bg-blue-600 px-3 py-2 font-medium text-white hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:opacity-60"
+      className="inline-flex items-center rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
     >
       {pending ? 'Saving…' : 'Save'}
     </button>
@@ -38,7 +38,7 @@ export function UpdateMemberForm({
       <div className="space-y-1">
         <label
           htmlFor={`role-${userId}`}
-          className="block text-xs font-medium"
+          className="block text-xs font-medium text-slate-600 dark:text-slate-400"
         >
           Role
         </label>
@@ -46,7 +46,7 @@ export function UpdateMemberForm({
           id={`role-${userId}`}
           name="role"
           defaultValue={currentRole}
-          className="rounded border px-2 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+          className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 dark:border-slate-700 dark:bg-slate-950"
         >
           <option value="user">user</option>
           <option value="manager">manager</option>
@@ -56,7 +56,7 @@ export function UpdateMemberForm({
       <div className="space-y-1">
         <label
           htmlFor={`status-${userId}`}
-          className="block text-xs font-medium"
+          className="block text-xs font-medium text-slate-600 dark:text-slate-400"
         >
           Status
         </label>
@@ -64,24 +64,22 @@ export function UpdateMemberForm({
           id={`status-${userId}`}
           name="status"
           defaultValue={currentStatus}
-          className="rounded border px-2 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+          className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 dark:border-slate-700 dark:bg-slate-950"
         >
           <option value="active">active</option>
           <option value="suspended">suspended</option>
         </select>
       </div>
+      <SubmitButton />
       {state.error && (
         <div
           role="alert"
-          className="basis-full rounded border border-red-300 bg-red-50 p-2 text-xs text-red-900"
+          className="basis-full rounded-md border border-rose-300 bg-rose-50 p-2 text-xs text-rose-900 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-200"
         >
-          <p className="font-semibold">{state.error.title}</p>
-          <p>
-            {state.error.code} (status {state.error.status})
-          </p>
+          <span className="font-semibold">{state.error.title}</span>{' '}
+          <span className="font-mono">[{state.error.code}]</span>
         </div>
       )}
-      <SubmitButton />
     </form>
   );
 }

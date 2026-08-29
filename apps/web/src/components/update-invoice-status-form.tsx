@@ -12,7 +12,7 @@ function SubmitButton() {
     <button
       type="submit"
       disabled={pending}
-      className="rounded bg-blue-600 px-3 py-2 font-medium text-white hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:opacity-60"
+      className="inline-flex items-center rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
     >
       {pending ? 'Updating…' : 'Mark as paid'}
     </button>
@@ -31,23 +31,30 @@ export function UpdateInvoiceStatusForm({
     initial,
   );
   return (
-    <form action={formAction} className="space-y-2 rounded border p-4">
-      <h2 className="text-lg font-semibold">Update status</h2>
-      <input type="hidden" name="organizationId" value={organizationId} />
-      <input type="hidden" name="invoiceId" value={invoiceId} />
-      <input type="hidden" name="status" value="paid" />
-      {state.error && (
-        <div
-          role="alert"
-          className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-900"
-        >
-          <p className="font-semibold">{state.error.title}</p>
-          <p>
-            {state.error.code} (status {state.error.status})
+    <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <form action={formAction} className="flex flex-wrap items-end gap-4">
+        <input type="hidden" name="organizationId" value={organizationId} />
+        <input type="hidden" name="invoiceId" value={invoiceId} />
+        <input type="hidden" name="status" value="paid" />
+        <div className="flex-1">
+          <h2 className="text-base font-semibold">Update status</h2>
+          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+            Mark this issued invoice as paid.
           </p>
+          {state.error && (
+            <div
+              role="alert"
+              className="mt-3 rounded-md border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-200"
+            >
+              <p className="font-semibold">{state.error.title}</p>
+              <p className="mt-0.5 text-xs">
+                code <code className="font-mono">{state.error.code}</code> · status {state.error.status}
+              </p>
+            </div>
+          )}
         </div>
-      )}
-      <SubmitButton />
-    </form>
+        <SubmitButton />
+      </form>
+    </section>
   );
 }
