@@ -21,11 +21,9 @@ const BASE: NodeJS.ProcessEnv = {
   SUPABASE_URL: 'http://127.0.0.1:54321',
   SUPABASE_ANON_KEY: 'anon-placeholder',
   SUPABASE_SERVICE_ROLE_KEY: 'service-placeholder',
-  SUPABASE_JWT_SECRET: 'a-secret-at-least-thirty-two-characters-long-yes',
   SUPABASE_JWT_AUDIENCE: 'authenticated',
-  SUPABASE_JWT_ISSUER: 'http://127.0.0.1:54321',
+  SUPABASE_JWT_ISSUER: 'http://127.0.0.1:54321/auth/v1',
   WEB_ORIGIN: 'http://localhost:3000',
-  DATABASE_URL: 'postgresql:///db?host=/tmp',
   NODE_ENV: 'development',
   LOG_LEVEL: 'info',
   API_PORT: '3001',
@@ -46,7 +44,7 @@ describe('loadEnv', () => {
   });
 
   it('rejects a missing required key and names it in invalidKeys (no values leaked)', () => {
-    const { SUPABASE_JWT_SECRET: _omit, ...rest } = BASE;
+    const { SUPABASE_ANON_KEY: _omit, ...rest } = BASE;
     let caught: unknown;
     try {
       loadEnv(rest as NodeJS.ProcessEnv);
@@ -55,7 +53,7 @@ describe('loadEnv', () => {
     }
     expect(caught).toBeInstanceOf(ConfigurationInvalidError);
     const err = caught as ConfigurationInvalidError;
-    expect(err.invalidKeys).toContain('SUPABASE_JWT_SECRET');
+    expect(err.invalidKeys).toContain('SUPABASE_ANON_KEY');
     // Names-only contract: error message and toString must NOT contain values.
     expect(err.message).toBe('configuration_invalid');
     expect(String(err)).toBe('configuration_invalid');
@@ -94,15 +92,32 @@ describe('loadEnv', () => {
     expect((caught as ConfigurationInvalidError).invalidKeys).toContain('OPENAPI_ENABLED');
   });
 
-  it('rejects SUPABASE_JWT_ISSUER that does not match SUPABASE_URL', () => {
-    let caught: unknown;
-    try {
-      loadEnv({ ...BASE, SUPABASE_URL: 'http://a', SUPABASE_JWT_ISSUER: 'http://b' });
-    } catch (e) {
-      caught = e;
+  it('requires SUPABASE_JWT_ISSUER to be the normalized Auth issuer', () => {
+    for (const badIssuer of ['http://127.0.0.1:54321', 'http://other/auth/v1']) {
+      expect(() =>
+        loadEnv({ ...BASE, SUPABASE_JWT_ISSUER: badIssuer }),
+      ).toThrow(ConfigurationInvalidError);
     }
-    expect(caught).toBeInstanceOf(ConfigurationInvalidError);
-    expect((caught as ConfigurationInvalidError).invalidKeys).toContain('SUPABASE_JWT_ISSUER');
+
+    const normalized = loadEnv({
+      ...BASE,
+      SUPABASE_URL: 'http://127.0.0.1:54321/',
+    });
+    expect(normalized.SUPABASE_URL).toBe('http://127.0.0.1:54321');
+    expect(normalized.SUPABASE_JWT_ISSUER).toBe(
+      'http://127.0.0.1:54321/auth/v1',
+    );
+  });
+
+  it('does not require removed runtime database or shared-secret configuration', () => {
+    const env = loadEnv({
+      ...BASE,
+      DATABASE_URL: undefined,
+      SUPABASE_JWT_SECRET: undefined,
+    });
+
+    expect(env).not.toHaveProperty('DATABASE_URL');
+    expect(env).not.toHaveProperty('SUPABASE_JWT_SECRET');
   });
 
   it('defaults OPENAPI_ENABLED to false when NODE_ENV=production', () => {
@@ -169,17 +184,6 @@ describe('loadEnv', () => {
     expect((caught as ConfigurationInvalidError).invalidKeys).toContain('SUPABASE_URL');
   });
 
-  it('rejects SUPABASE_JWT_SECRET shorter than 32 chars', () => {
-    let caught: unknown;
-    try {
-      loadEnv({ ...BASE, SUPABASE_JWT_SECRET: 'short' });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(ConfigurationInvalidError);
-    expect((caught as ConfigurationInvalidError).invalidKeys).toContain('SUPABASE_JWT_SECRET');
-  });
-
   it('rejects SUPABASE_JWT_AUDIENCE that is not "authenticated"', () => {
     let caught: unknown;
     try {
@@ -189,17 +193,6 @@ describe('loadEnv', () => {
     }
     expect(caught).toBeInstanceOf(ConfigurationInvalidError);
     expect((caught as ConfigurationInvalidError).invalidKeys).toContain('SUPABASE_JWT_AUDIENCE');
-  });
-
-  it('rejects invalid DATABASE_URL scheme', () => {
-    let caught: unknown;
-    try {
-      loadEnv({ ...BASE, DATABASE_URL: 'mysql://x' });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(ConfigurationInvalidError);
-    expect((caught as ConfigurationInvalidError).invalidKeys).toContain('DATABASE_URL');
   });
 
   it('rejects non-positive RATE_LIMIT_WINDOW_MS', () => {

@@ -13,7 +13,7 @@ import { HealthModule } from './health/health.module';
 // AuditService). DatabaseModule before AuthModule (MeService depends on
 // CALLER_CLIENT). OrganizationsModule before InvoicesModule and before
 // RefundsModule (both InvoiceService and RefundService depend on
-// MembershipService). HealthModule is self-contained (it owns its PG_POOL).
+// MembershipService). HealthModule is self-contained.
 @Module({
   imports: [
     ConfigModule,

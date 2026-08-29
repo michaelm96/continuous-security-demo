@@ -1,7 +1,5 @@
 // DatabaseModule — exports only the caller-scoped client factory
-// (CALLER_CLIENT). No PG_POOL, no elevated-privilege client. The HealthService
-// pg.Pool probe from Task 4 was relocated to HealthModule (its sole
-// consumer) so this module is exclusively the caller boundary.
+// (CALLER_CLIENT). No direct database pool or elevated-privilege client.
 
 import { Module } from '@nestjs/common';
 

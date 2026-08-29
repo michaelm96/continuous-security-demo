@@ -56,9 +56,11 @@ it('service-role key appears in exactly the five approved boundary files', () =>
     .sort();
   expect(offenders).toEqual([
     'apps/api/src/audit/audit.module.ts',
+    'apps/api/src/auth/jwt-verifier.spec.ts',
     'apps/api/src/config/config.module.ts',
     'apps/api/src/config/env.spec.ts',
     'apps/api/src/config/env.ts',
+    'apps/api/src/health/health.service.spec.ts',
     'apps/api/test/setup-env.ts',
   ]);
 });

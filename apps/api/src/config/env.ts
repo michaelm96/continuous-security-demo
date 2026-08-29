@@ -5,7 +5,7 @@
 // is safe.
 //
 // Spec §3.4 / §10.1 contract:
-// - 16 required env vars (incl. DATABASE_URL which is a Task 2 prerequisite).
+// - Supabase Auth issuer is derived from the normalized project URL.
 // - Production defaults OPENAPI_ENABLED to false; non-production defaults true.
 // - Explicit OPENAPI_ENABLED always overrides the default.
 // - Missing/invalid keys push the key name into invalidKeys.
@@ -27,7 +27,6 @@ export interface Env {
   SUPABASE_URL: string;
   SUPABASE_ANON_KEY: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
-  SUPABASE_JWT_SECRET: string;
   SUPABASE_JWT_AUDIENCE: string;
   SUPABASE_JWT_ISSUER: string;
   NODE_ENV: NodeEnv;
@@ -38,7 +37,6 @@ export interface Env {
   BODY_LIMIT_KB: number;
   JSON_DEPTH_LIMIT: number;
   OPENAPI_ENABLED: boolean;
-  DATABASE_URL: string;
 }
 
 export class ConfigurationInvalidError extends Error {
@@ -186,7 +184,10 @@ export function loadEnv(source: NodeJS.ProcessEnv): Env {
     oneOf<LogLevel>('LOG_LEVEL', source.LOG_LEVEL, LOG_LEVELS, 'info', sink) ??
     'info';
 
-  const SUPABASE_URL = requireUrl('SUPABASE_URL', source.SUPABASE_URL, sink);
+  const rawSupabaseUrl = requireUrl('SUPABASE_URL', source.SUPABASE_URL, sink);
+  const SUPABASE_URL = rawSupabaseUrl?.endsWith('/')
+    ? rawSupabaseUrl.slice(0, -1)
+    : rawSupabaseUrl;
   const SUPABASE_ANON_KEY = requireString(
     'SUPABASE_ANON_KEY',
     source.SUPABASE_ANON_KEY,
@@ -197,14 +198,6 @@ export function loadEnv(source: NodeJS.ProcessEnv): Env {
     source.SUPABASE_SERVICE_ROLE_KEY,
     sink,
   );
-  const SUPABASE_JWT_SECRET = requireString(
-    'SUPABASE_JWT_SECRET',
-    source.SUPABASE_JWT_SECRET,
-    sink,
-  );
-  if (SUPABASE_JWT_SECRET !== undefined && SUPABASE_JWT_SECRET.length < 32) {
-    sink.invalidKeys.push('SUPABASE_JWT_SECRET');
-  }
   const SUPABASE_JWT_AUDIENCE = requireString(
     'SUPABASE_JWT_AUDIENCE',
     source.SUPABASE_JWT_AUDIENCE,
@@ -218,18 +211,12 @@ export function loadEnv(source: NodeJS.ProcessEnv): Env {
     source.SUPABASE_JWT_ISSUER,
     sink,
   );
-  if (
-    SUPABASE_JWT_ISSUER !== undefined &&
-    SUPABASE_URL !== undefined &&
-    SUPABASE_JWT_ISSUER !== SUPABASE_URL
-  ) {
-    sink.invalidKeys.push('SUPABASE_JWT_ISSUER');
+  if (SUPABASE_JWT_ISSUER !== undefined && SUPABASE_URL !== undefined) {
+    if (SUPABASE_JWT_ISSUER !== `${SUPABASE_URL}/auth/v1`) {
+      sink.invalidKeys.push('SUPABASE_JWT_ISSUER');
+    }
   }
   const WEB_ORIGIN = requireOrigin('WEB_ORIGIN', source.WEB_ORIGIN, sink);
-  const DATABASE_URL = requireString('DATABASE_URL', source.DATABASE_URL, sink);
-  if (DATABASE_URL !== undefined && !DATABASE_URL.startsWith('postgresql://')) {
-    sink.invalidKeys.push('DATABASE_URL');
-  }
 
   const API_PORT = intInRange('API_PORT', source.API_PORT, 3001, 1, 65535, sink);
   const RATE_LIMIT_WINDOW_MS = intInRange(
@@ -299,7 +286,6 @@ export function loadEnv(source: NodeJS.ProcessEnv): Env {
     SUPABASE_URL: SUPABASE_URL!,
     SUPABASE_ANON_KEY: SUPABASE_ANON_KEY!,
     SUPABASE_SERVICE_ROLE_KEY: SUPABASE_SERVICE_ROLE_KEY!,
-    SUPABASE_JWT_SECRET: SUPABASE_JWT_SECRET!,
     SUPABASE_JWT_AUDIENCE: SUPABASE_JWT_AUDIENCE!,
     SUPABASE_JWT_ISSUER: SUPABASE_JWT_ISSUER!,
     NODE_ENV,
@@ -310,6 +296,5 @@ export function loadEnv(source: NodeJS.ProcessEnv): Env {
     BODY_LIMIT_KB,
     JSON_DEPTH_LIMIT,
     OPENAPI_ENABLED,
-    DATABASE_URL: DATABASE_URL!,
   };
 }

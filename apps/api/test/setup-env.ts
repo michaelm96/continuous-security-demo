@@ -27,9 +27,8 @@ const DEFAULTS: Record<string, string> = {
   SUPABASE_URL: 'http://127.0.0.1:54321',
   SUPABASE_ANON_KEY: 'test-anon-key-placeholder',
   SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key-placeholder',
-  SUPABASE_JWT_SECRET: 'test-only-jwt-secret-32-bytes-min-len-please',
   SUPABASE_JWT_AUDIENCE: 'authenticated',
-  SUPABASE_JWT_ISSUER: 'http://127.0.0.1:54321',
+  SUPABASE_JWT_ISSUER: 'http://127.0.0.1:54321/auth/v1',
   LOG_LEVEL: 'silent',
   RATE_LIMIT_WINDOW_MS: '60000',
   RATE_LIMIT_AUTH_PER_MIN: '60',
@@ -37,8 +36,6 @@ const DEFAULTS: Record<string, string> = {
   BODY_LIMIT_KB: '100',
   JSON_DEPTH_LIMIT: '20',
   OPENAPI_ENABLED: 'true',
-  DATABASE_URL:
-    process.env.DATABASE_URL ?? 'postgresql:///continuous_security_demo?host=/tmp',
 };
 for (const [k, v] of Object.entries(DEFAULTS)) {
   if (process.env[k] === undefined) process.env[k] = v;

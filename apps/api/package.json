@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.build.json",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "npm run build && node dist/main.js",
+    "start:dev": "node --env-file-if-exists=../../.env ../../node_modules/@nestjs/cli/bin/nest.js start --watch",
     "start:prod": "node dist/main",
     "lint": "oxlint src/ test/",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand",

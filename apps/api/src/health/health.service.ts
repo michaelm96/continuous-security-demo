@@ -1,88 +1,101 @@
-// HealthService. Independent probes per Spec §3.4 / Plan Step 5.
-//
-// Postgres.app adaptation (forced deviation from plan, documented in report):
-// - `database` probe: pg.Pool.query('SELECT public.health_check()')
-// - `auth` probe: same query (no separate Auth service on Postgres.app dev host)
-// - `jwks` probe: SUPABASE_JWT_SECRET length >= 32 (placeholder for real
-//   RS256 JWKS endpoint when real Supabase Auth lands)
-//
-// Each probe runs in parallel under a 2-second timeout. Any failure throws
-// `dependency_unavailable` for the global filter to convert to 503.
-
 import { Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
-import type { Pool } from 'pg';
 
-import { PG_POOL } from './pg-pool.token';
 import { ENV } from '../config/config.module';
 import type { Env } from '../config/env';
 
-export interface Probe {
-  name: string;
-  run(): Promise<void>;
-  timeoutMs: number;
+export interface HealthRpcResult {
+  data: unknown;
+  error: unknown;
 }
+
+export interface HealthClient {
+  rpc(name: 'health_check'): {
+    abortSignal(signal: AbortSignal): PromiseLike<HealthRpcResult>;
+  };
+}
+
+export type HealthFetch = (
+  input: string | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export const HEALTH_CLIENT = Symbol('HEALTH_CLIENT');
+export const HEALTH_FETCH = Symbol('HEALTH_FETCH');
 
 @Injectable()
 export class HealthService {
   constructor(
-    @Inject(PG_POOL) private readonly pool: Pool,
+    @Inject(HEALTH_CLIENT) private readonly client: HealthClient,
     @Inject(ENV) private readonly env: Env,
+    @Inject(HEALTH_FETCH) private readonly fetchFn: HealthFetch,
   ) {}
-
-  private get probes(): Probe[] {
-    const env = this.env;
-    return [
-      {
-        name: 'database',
-        run: async () => {
-          await this.pool.query('SELECT public.health_check()');
-        },
-        timeoutMs: 2000,
-      },
-      {
-        name: 'auth',
-        run: async () => {
-          // Postgres.app adaptation: same DB query — no separate Auth
-          // service on this dev host. When real Supabase Auth lands, swap
-          // this for a fetch against `${SUPABASE_URL}/auth/v1/health` with
-          // AbortSignal.timeout(2000).
-          await this.pool.query('SELECT public.health_check()');
-        },
-        timeoutMs: 2000,
-      },
-      {
-        name: 'jwks',
-        run: async () => {
-          const secret = process.env.SUPABASE_JWT_SECRET;
-          if (!secret || secret.length < 32) {
-            throw new Error('jwks_secret_missing');
-          }
-        },
-        timeoutMs: 2000,
-      },
-    ];
-  }
 
   async check(): Promise<void> {
     try {
-      await Promise.all(this.probes.map((p) => this.runProbe(p)));
-    } catch (err) {
+      await Promise.all([
+        this.runProbe((signal) => this.checkDatabase(signal)),
+        this.runProbe((signal) => this.checkAuth(signal)),
+        this.runProbe((signal) => this.checkJwks(signal)),
+      ]);
+    } catch {
       throw new ServiceUnavailableException({
         code: 'dependency_unavailable',
-        message: err instanceof Error ? err.message : 'probe_failed',
       });
     }
   }
 
-  private async runProbe(p: Probe): Promise<void> {
-    await Promise.race([
-      p.run(),
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error(`${p.name}_timeout`)),
-          p.timeoutMs,
+  private async checkDatabase(signal: AbortSignal): Promise<void> {
+    const { data, error } = await this.client
+      .rpc('health_check')
+      .abortSignal(signal);
+    if (error || data !== true) throw new Error('dependency_unavailable');
+  }
+
+  private async checkAuth(signal: AbortSignal): Promise<void> {
+    const response = await this.fetchFn(`${this.env.SUPABASE_URL}/auth/v1/health`, {
+      headers: { apikey: this.env.SUPABASE_ANON_KEY },
+      signal,
+    });
+    if (!response.ok) throw new Error('dependency_unavailable');
+  }
+
+  private async checkJwks(signal: AbortSignal): Promise<void> {
+    const response = await this.fetchFn(
+      `${this.env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`,
+      { signal },
+    );
+    if (!response.ok) throw new Error('dependency_unavailable');
+
+    const body: unknown = await response.json();
+    if (
+      typeof body !== 'object' ||
+      body === null ||
+      !('keys' in body) ||
+      !Array.isArray(body.keys) ||
+      body.keys.length === 0
+    ) {
+      throw new Error('dependency_unavailable');
+    }
+  }
+
+  private async runProbe(
+    run: (signal: AbortSignal) => Promise<void>,
+  ): Promise<void> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    try {
+      await Promise.race([
+        run(controller.signal),
+        new Promise<never>((_, reject) =>
+          controller.signal.addEventListener(
+            'abort',
+            () => reject(new Error('dependency_unavailable')),
+            { once: true },
+          ),
         ),
-      ),
-    ]);
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }

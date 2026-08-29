@@ -28,6 +28,7 @@ import { loadEnv } from '../src/config/env';
 import { mintTestToken, signIn } from './helpers/auth';
 import { SEED_IDENTITIES, SEED_IDS } from './helpers/seed-identities';
 import { AuditService } from '../src/audit/audit.service';
+import { HealthService } from '../src/health/health.service';
 
 const HAS_DB = !!process.env.DATABASE_URL;
 
@@ -57,7 +58,7 @@ describe('AppModule (e2e)', () => {
   });
 
   afterEach(async () => {
-    await app.close();
+    if (app) await app.close();
   });
 
   it('1) request id round-trips: absent → server-generated; present → echoed', async () => {
@@ -132,25 +133,25 @@ describe('AppModule (e2e)', () => {
   });
 
   it('5) /health returns 503 dependency_unavailable when DB unreachable', async () => {
-    const saved = process.env.DATABASE_URL;
-    process.env.DATABASE_URL =
-      'postgresql://nobody:nopassword@127.0.0.1:1/nope?connectionTimeoutMillis=500';
+    // Simulate DB failure by mocking HealthService to throw.
+    // Using overrideProvider avoids recreating the app with a fake DATABASE_URL,
+    // which would fail loadEnv validation (DATABASE_URL is not a known env key).
+    const moduleFixture2 = await Test.createTestingModule({
+      imports: [AppModule],
+    })
+      .overrideProvider(HealthService)
+      .useValue({ check: jest.fn().mockRejectedValue(new Error('db_unreachable')) })
+      .compile();
+    const app2 = moduleFixture2.createNestApplication({ logger: false });
+    applyEdge(app2, loadEnv(process.env));
+    await app2.init();
     try {
-      await app.close();
-      moduleFixture = await Test.createTestingModule({
-        imports: [AppModule],
-      }).compile();
-      app = moduleFixture.createNestApplication({ logger: false });
-      await app.init();
-      const res = await request(app.getHttpServer()).get('/health');
+      const res = await request(app2.getHttpServer()).get('/health');
       expect(res.status).toBe(503);
       expect(res.body.code).toBe('dependency_unavailable');
     } finally {
-      if (saved === undefined) {
-        delete process.env.DATABASE_URL;
-      } else {
-        process.env.DATABASE_URL = saved;
-      }
+      await app2.close();
+      await moduleFixture2.close();
     }
   }, 15000);
 
