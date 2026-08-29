@@ -7,6 +7,11 @@ const config: Config = {
   transform: {
     '^.+\\.(t|j)s$': '@swc/jest',
   },
+  // Nest 12 packages are ESM-only; @swc/jest needs to transform them so
+  // CJS test files can require() them. Same exception list as the e2e
+  // and RLS jest configs (apps/api/test/jest-e2e.json,
+  // apps/api/test/jest-rls.json).
+  transformIgnorePatterns: ['node_modules/(?!(@nestjs|@swc|jose)/)'],
   collectCoverageFrom: ['**/*.(t|j)s'],
   coverageDirectory: '../coverage',
   testEnvironment: 'node',

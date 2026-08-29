@@ -432,4 +432,183 @@ describe('AppModule (e2e)', () => {
       expect(['unauthenticated', 'audit_unavailable']).toContain(res.body.code);
     });
   });
+
+  // ===========================================================================
+  // Task 7 — Invoices + ownership + state transitions.
+  //
+  // Same dev-env caveat as Task 6: caller-scoped Supabase queries cannot
+  // reach PostgREST in this env, so list/get/create/update return what the
+  // Nest layer returns before/after the (failing) DB call. DTO validation
+  // and Problem Details shape are fully verifiable here; data paths are
+  // covered by test:unit (mocked) and test:rls (direct Postgres).
+  // ===========================================================================
+  describe('Task 7: invoice DTO allowlists', () => {
+    it('CreateInvoiceDto rejects amountMinor = 0 as 400 validation_failed', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaManager);
+      const res = await request(app.getHttpServer())
+        .post(`/organizations/${SEED_IDS.alphaOrg}/invoices`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          customerId: 'cust-1',
+          description: 'desc',
+          amountMinor: 0,
+          currency: 'USD',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('validation_failed');
+    });
+
+    it('CreateInvoiceDto rejects amountMinor = 9007199254740992 as 400 (above bigint max)', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaManager);
+      const res = await request(app.getHttpServer())
+        .post(`/organizations/${SEED_IDS.alphaOrg}/invoices`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          customerId: 'cust-1',
+          description: 'desc',
+          amountMinor: '9007199254740992',
+          currency: 'USD',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('validation_failed');
+    });
+
+    it('CreateInvoiceDto accepts amountMinor = 9007199254740991 (the ceiling)', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaManager);
+      const res = await request(app.getHttpServer())
+        .post(`/organizations/${SEED_IDS.alphaOrg}/invoices`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          customerId: 'cust-1',
+          description: 'desc',
+          amountMinor: 9007199254740991,
+          currency: 'USD',
+        });
+      // DTO accepted; downstream returns whatever the Nest layer returns
+      // when the DB call fails in dev.
+      expect([200, 201, 404, 403, 503]).toContain(res.status);
+    });
+
+    it('CreateInvoiceDto rejects currency = "usd" (lowercase) as 400', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaManager);
+      const res = await request(app.getHttpServer())
+        .post(`/organizations/${SEED_IDS.alphaOrg}/invoices`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          customerId: 'cust-1',
+          description: 'desc',
+          amountMinor: 1000,
+          currency: 'usd',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('validation_failed');
+    });
+
+    it('CreateInvoiceDto rejects currency = "US" (too short) as 400', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaManager);
+      const res = await request(app.getHttpServer())
+        .post(`/organizations/${SEED_IDS.alphaOrg}/invoices`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          customerId: 'cust-1',
+          description: 'desc',
+          amountMinor: 1000,
+          currency: 'US',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('validation_failed');
+    });
+
+    it('CreateInvoiceDto rejects currency = "USDD" (too long) as 400', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaManager);
+      const res = await request(app.getHttpServer())
+        .post(`/organizations/${SEED_IDS.alphaOrg}/invoices`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          customerId: 'cust-1',
+          description: 'desc',
+          amountMinor: 1000,
+          currency: 'USDD',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('validation_failed');
+    });
+
+    it('CreateInvoiceDto rejects authority mass assignment (owner_id, organization_id, status) as 400', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaManager);
+      const res = await request(app.getHttpServer())
+        .post(`/organizations/${SEED_IDS.alphaOrg}/invoices`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          customerId: 'cust-1',
+          description: 'desc',
+          amountMinor: 1000,
+          currency: 'USD',
+          owner_id: SEED_IDS.alphaAdmin,
+          organization_id: SEED_IDS.betaOrg,
+          status: 'paid',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('validation_failed');
+    });
+
+    it('PatchInvoiceDto accepts issued, paid, cancelled and rejects draft as 400', async () => {
+      const token = await signIn(SEED_IDENTITIES.alphaManager);
+      for (const status of ['issued', 'paid', 'cancelled']) {
+        const res = await request(app.getHttpServer())
+          .patch(
+            `/organizations/${SEED_IDS.alphaOrg}/invoices/${SEED_IDS.alphaUserAInvoiceDraft}`,
+          )
+          .set('Authorization', `Bearer ${token}`)
+          .send({ status });
+        // DTO accepted; downstream returns 404/409/503 in dev depending on
+        // whether the load + update succeed. The DTO never rejects these.
+        expect([200, 404, 409, 503]).toContain(res.status);
+      }
+      const draft = await request(app.getHttpServer())
+        .patch(
+          `/organizations/${SEED_IDS.alphaOrg}/invoices/${SEED_IDS.alphaUserAInvoiceDraft}`,
+        )
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: 'draft' });
+      expect(draft.status).toBe(400);
+      expect(draft.body.code).toBe('validation_failed');
+    });
+  });
+
+  describe('Task 7: invoice routes mounted', () => {
+    const orgPath = `/organizations/${SEED_IDS.alphaOrg}/invoices`;
+
+    it('GET /organizations/:organizationId/invoices route exists', async () => {
+      const res = await request(app.getHttpServer()).get(orgPath);
+      expect([401, 503]).toContain(res.status);
+      expect(['unauthenticated', 'audit_unavailable']).toContain(res.body.code);
+    });
+
+    it('POST /organizations/:organizationId/invoices route exists', async () => {
+      const res = await request(app.getHttpServer())
+        .post(orgPath)
+        .send({
+          customerId: 'cust-1',
+          description: 'desc',
+          amountMinor: 1000,
+          currency: 'USD',
+        });
+      expect([401, 503]).toContain(res.status);
+    });
+
+    it('GET /organizations/:organizationId/invoices/:invoiceId route exists', async () => {
+      const res = await request(app.getHttpServer()).get(
+        `${orgPath}/${SEED_IDS.alphaUserAInvoiceDraft}`,
+      );
+      expect([401, 503]).toContain(res.status);
+    });
+
+    it('PATCH /organizations/:organizationId/invoices/:invoiceId route exists', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${orgPath}/${SEED_IDS.alphaUserAInvoiceDraft}`)
+        .send({ status: 'issued' });
+      expect([401, 503]).toContain(res.status);
+    });
+  });
 });

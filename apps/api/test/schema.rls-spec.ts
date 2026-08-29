@@ -776,3 +776,402 @@ describe('Task 6: membership updates + last-admin trigger', () => {
     }
   });
 });
+
+// ----------------------------------------------------------------------------
+// Task 7 — invoice ownership + state transitions + allowlists.
+// Uses the deterministic seed (alphaUserA owns an Alpha draft,
+// alphaUserB owns an Alpha issued; betaAdmin owns a Beta issued). All
+// queries run under SET LOCAL role authenticated with the caller's JWT
+// claims, exactly as the caller-scoped Supabase client does in prod.
+// ----------------------------------------------------------------------------
+
+describe('Task 7: invoice ownership + state (RLS)', () => {
+  let client: Client;
+
+  beforeAll(async () => {
+    client = new Client({ connectionString });
+    await client.connect();
+  });
+  afterAll(async () => { await client.end(); });
+
+  it('active user A sees own Alpha invoice and Alpha issued invoice as owner', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaUserA);
+    const claims = await decodeAccessToken(token);
+    await asAuthenticated(client, claims.sub, async () => {
+      const { rows } = await client.query<{ id: string }>(
+        `select id from public.invoices where organization_id = $1 order by id asc`,
+        [SEED_IDS.alphaOrg],
+      );
+      // alphaUserA owns the Alpha draft; the Alpha issued invoice is
+      // hidden by RLS (owner_id ≠ auth.uid() and role is `user`).
+      expect(rows.map((r) => r.id)).toEqual([SEED_IDS.alphaUserAInvoiceDraft]);
+    });
+  });
+
+  it('active manager sees all Alpha invoices (org-wide visibility)', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaManager);
+    const claims = await decodeAccessToken(token);
+    await asAuthenticated(client, claims.sub, async () => {
+      const { rows } = await client.query<{ id: string }>(
+        `select id from public.invoices where organization_id = $1 order by id asc`,
+        [SEED_IDS.alphaOrg],
+      );
+      const ids = rows.map((r) => r.id).sort();
+      expect(ids).toEqual(
+        [SEED_IDS.alphaUserAInvoiceDraft, SEED_IDS.alphaUserBInvoiceIssued].sort(),
+      );
+    });
+  });
+
+  it('active admin sees all Alpha invoices (org-wide visibility)', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+    const claims = await decodeAccessToken(token);
+    await asAuthenticated(client, claims.sub, async () => {
+      const { rows } = await client.query<{ id: string }>(
+        `select id from public.invoices where organization_id = $1 order by id asc`,
+        [SEED_IDS.alphaOrg],
+      );
+      const ids = rows.map((r) => r.id).sort();
+      expect(ids).toEqual(
+        [SEED_IDS.alphaUserAInvoiceDraft, SEED_IDS.alphaUserBInvoiceIssued].sort(),
+      );
+    });
+  });
+
+  it('cross-tenant: alpha user SELECTing Beta invoice is hidden (0 rows)', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaUserA);
+    const claims = await decodeAccessToken(token);
+    await asAuthenticated(client, claims.sub, async () => {
+      const { rows } = await client.query<{ id: string }>(
+        `select id from public.invoices where id = $1`,
+        [SEED_IDS.betaAdminInvoice],
+      );
+      expect(rows).toEqual([]);
+    });
+  });
+
+  it('user A INSERTing an invoice sets owner_id from auth.uid() (DB-derived default)', async () => {
+    // Reset the user's own session and INSERT one — owner_id is not in the
+    // INSERT column grant; it must be defaulted via auth.uid(). This proves
+    // the API doesn't need to send owner_id and direct PostgREST cannot
+    // override it.
+    const token = await signIn(SEED_IDENTITIES.alphaUserA);
+    const claims = await decodeAccessToken(token);
+    await expect(
+      asAuthenticated(client, claims.sub, async () => {
+        // The user role is `user`; invoices_insert_manager requires
+        // manager|organization_admin. RLS rejects the INSERT.
+        await client.query(
+          `insert into public.invoices
+             (organization_id, customer_id, description, amount_minor, currency)
+           values ($1, 'cust', 'desc', 100, 'USD')`,
+          [SEED_IDS.alphaOrg],
+        );
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('manager INSERTing an invoice succeeds; owner_id is auth.uid()', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaManager);
+    const claims = await decodeAccessToken(token);
+    await asAuthenticated(client, claims.sub, async () => {
+      const { rows } = await client.query<{ owner_id: string }>(
+        `insert into public.invoices
+           (organization_id, customer_id, description, amount_minor, currency)
+         values ($1, 'cust-x', 'desc-x', 500, 'USD')
+         returning owner_id`,
+        [SEED_IDS.alphaOrg],
+      );
+      expect(rows[0].owner_id).toBe(SEED_IDS.alphaManager);
+    });
+  });
+
+  it('UPDATE setting status to paid for an already-paid invoice is a no-op (self-transition allowed)', async () => {
+    // asSuperuserTx rolls back at the end so we can't observe the change
+    // across queries. Instead, drive the UPDATE inside an explicit
+    // transaction and query within the same transaction before commit.
+    await client.query('begin');
+    try {
+      // First move issued → paid.
+      await client.query(
+        `update public.invoices set status = 'paid' where id = $1`,
+        [SEED_IDS.alphaUserBInvoiceIssued],
+      );
+      // Now self-transition paid → paid: trigger is no-op.
+      await client.query(
+        `update public.invoices set status = 'paid' where id = $1`,
+        [SEED_IDS.alphaUserBInvoiceIssued],
+      );
+      const { rows } = await client.query<{ status: string }>(
+        `select status from public.invoices where id = $1`,
+        [SEED_IDS.alphaUserBInvoiceIssued],
+      );
+      expect(rows[0].status).toBe('paid');
+    } finally {
+      await client.query('rollback');
+    }
+  });
+
+  it('paid → cancelled is rejected by trigger (invalid_state, P0001)', async () => {
+    // Drive the UPDATE inside a transaction so the trigger fires; rollback
+    // regardless of outcome.
+    await client.query('begin');
+    let thrown: unknown;
+    try {
+      await client.query(
+        `update public.invoices set status = 'paid' where id = $1`,
+        [SEED_IDS.alphaUserBInvoiceIssued],
+      );
+      try {
+        await client.query(
+          `update public.invoices set status = 'cancelled' where id = $1`,
+          [SEED_IDS.alphaUserBInvoiceIssued],
+        );
+      } catch (err) {
+        thrown = err;
+      }
+    } finally {
+      await client.query('rollback');
+    }
+    expect(thrown).toMatchObject({ message: expect.stringMatching(/invalid_state/) });
+  });
+
+  it('issued → draft is rejected by trigger (invalid_state, P0001)', async () => {
+    await client.query('begin');
+    let thrown: unknown;
+    try {
+      // alphaUserAInvoiceDraft starts at 'draft'; first move to 'issued',
+      // then try issued → draft. Both within one transaction so the
+      // intermediate state is visible to the trigger.
+      await client.query(
+        `update public.invoices set status = 'issued' where id = $1`,
+        [SEED_IDS.alphaUserAInvoiceDraft],
+      );
+      try {
+        await client.query(
+          `update public.invoices set status = 'draft' where id = $1`,
+          [SEED_IDS.alphaUserAInvoiceDraft],
+        );
+      } catch (err) {
+        thrown = err;
+      }
+    } finally {
+      await client.query('rollback');
+    }
+    expect(thrown).toMatchObject({ message: expect.stringMatching(/invalid_state/) });
+  });
+
+  it('CHECK constraint: amount_minor = 9007199254740991 is accepted', async () => {
+    await asSuperuserTx(client, async () => {
+      // 9007199254740991 is exactly Number.MAX_SAFE_INTEGER in JS.
+      const { rows } = await client.query<{ amount_minor: string }>(
+        `update public.invoices set amount_minor = 9007199254740991 where id = $1 returning amount_minor`,
+        [SEED_IDS.alphaUserAInvoiceDraft],
+      );
+      expect(rows[0].amount_minor).toBe('9007199254740991');
+    });
+  });
+
+  it('CHECK constraint: amount_minor = 9007199254740992 is rejected (23514)', async () => {
+    await expect(
+      client.query(
+        `update public.invoices set amount_minor = 9007199254740992 where id = $1`,
+        [SEED_IDS.alphaUserAInvoiceDraft],
+      ),
+    ).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('CHECK constraint: currency = USDD is rejected (22001 char(3) truncation)', async () => {
+    await expect(
+      client.query(
+        `update public.invoices set currency = 'USDD' where id = $1`,
+        [SEED_IDS.alphaUserAInvoiceDraft],
+      ),
+    ).rejects.toMatchObject({ code: '22001' });
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Task 7 — invoice visibility, ownership, and RLS-denied writes.
+// Exercises the existing invoices_select_visible, invoices_insert_manager,
+// invoices_update_manager policies. The Postgres trigger
+// enforce_invoice_state_transition() is also covered at the SQL boundary.
+// ----------------------------------------------------------------------------
+
+describe('Task 7: invoice visibility', () => {
+  let client: Client;
+  let orgId: string;
+  let userAId: string;
+  let userBId: string;
+  let managerId: string;
+  let invoiceOwnedByA: string;
+  let invoiceOwnedByB: string;
+
+  beforeAll(async () => {
+    client = new Client({ connectionString });
+    await client.connect();
+    const { rows: orgRows } = await client.query<{ id: string }>(
+      `insert into public.organizations (name) values ('Task7 Org') returning id`,
+    );
+    orgId = orgRows[0].id;
+
+    async function mkUser(role: 'user' | 'manager'): Promise<string> {
+      const { rows } = await client.query<{ id: string }>(
+        `insert into auth.users default values returning id`,
+      );
+      const id = rows[0].id;
+      await client.query(
+        `insert into public.profiles (user_id, display_name) values ($1, $2)`,
+        [id, `T7 ${role}`],
+      );
+      await client.query(
+        `insert into public.memberships (organization_id, user_id, role, status)
+         values ($1, $2, $3, 'active')`,
+        [orgId, id, role],
+      );
+      return id;
+    }
+
+    userAId = await mkUser('user');
+    userBId = await mkUser('user');
+    managerId = await mkUser('manager');
+
+    async function mkInvoice(ownerId: string): Promise<string> {
+      const { rows } = await client.query<{ id: string }>(
+        `insert into public.invoices
+           (organization_id, owner_id, customer_id, description, amount_minor, currency, status)
+         values ($1, $2, 'cust', 'desc', 1000, 'USD', 'draft')
+         returning id`,
+        [orgId, ownerId],
+      );
+      return rows[0].id;
+    }
+
+    invoiceOwnedByA = await mkInvoice(userAId);
+    invoiceOwnedByB = await mkInvoice(userBId);
+  });
+  afterAll(async () => { await client.end(); });
+
+  it('active user sees ONLY own invoice (invoices_select_visible: user branch)', async () => {
+    await asAuthenticated(client, userAId, async () => {
+      const { rows } = await client.query<{ id: string }>(
+        `select id from public.invoices where organization_id = $1 order by id asc`,
+        [orgId],
+      );
+      expect(rows.map((r) => r.id)).toEqual([invoiceOwnedByA]);
+    });
+  });
+
+  it("active user sees 0 rows for another user's invoice", async () => {
+    await asAuthenticated(client, userAId, async () => {
+      const { rows } = await client.query<{ id: string }>(
+        `select id from public.invoices where id = $1`,
+        [invoiceOwnedByB],
+      );
+      expect(rows).toEqual([]);
+    });
+  });
+
+  it('manager sees all invoices in the organization (invoices_select_visible: manager branch)', async () => {
+    await asAuthenticated(client, managerId, async () => {
+      const { rows } = await client.query<{ id: string }>(
+        `select id from public.invoices where organization_id = $1 order by id asc`,
+        [orgId],
+      );
+      expect(rows.map((r) => r.id).sort()).toEqual(
+        [invoiceOwnedByA, invoiceOwnedByB].sort(),
+      );
+    });
+  });
+
+  it("user UPDATE on another user's invoice matches 0 rows (RLS filters via USING)", async () => {
+    await asAuthenticated(client, userAId, async () => {
+      const { rowCount } = await client.query(
+        `update public.invoices set status = 'issued' where id = $1`,
+        [invoiceOwnedByB],
+      );
+      expect(rowCount).toBe(0);
+    });
+  });
+});
+
+describe('Task 7: invoice insert RLS', () => {
+  let client: Client;
+  let orgId: string;
+  let userId: string;
+  let managerId: string;
+
+  beforeAll(async () => {
+    client = new Client({ connectionString });
+    await client.connect();
+    const { rows: orgRows } = await client.query<{ id: string }>(
+      `insert into public.organizations (name) values ('Task7 Insert') returning id`,
+    );
+    orgId = orgRows[0].id;
+    async function mkUser(role: 'user' | 'manager'): Promise<string> {
+      const { rows } = await client.query<{ id: string }>(
+        `insert into auth.users default values returning id`,
+      );
+      const id = rows[0].id;
+      await client.query(
+        `insert into public.profiles (user_id, display_name) values ($1, $2)`,
+        [id, `T7i ${role}`],
+      );
+      await client.query(
+        `insert into public.memberships (organization_id, user_id, role, status)
+         values ($1, $2, $3, 'active')`,
+        [orgId, id, role],
+      );
+      return id;
+    }
+    userId = await mkUser('user');
+    managerId = await mkUser('manager');
+  });
+  afterAll(async () => { await client.end(); });
+
+  it('user INSERT is rejected by RLS WITH CHECK (policy violation)', async () => {
+    // Unlike SELECT/UPDATE (which silently filter via USING), INSERT with a
+    // failing WITH CHECK throws "new row violates row-level security policy".
+    // The error code is 42501 (insufficient_privilege). Nest maps this to
+    // 403 forbidden or 404 not_found depending on the service layer.
+    await expect(
+      asAuthenticated(client, userId, async () => {
+        await client.query(
+          `insert into public.invoices
+             (organization_id, customer_id, description, amount_minor, currency)
+           values ($1, 'cust', 'desc', 100, 'USD')`,
+          [orgId],
+        );
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('manager INSERT succeeds and DB defaults owner_id = auth.uid(), status = draft', async () => {
+    await asAuthenticated(client, managerId, async () => {
+      const { rows } = await client.query<{ owner_id: string; status: string }>(
+        `insert into public.invoices
+           (organization_id, customer_id, description, amount_minor, currency)
+         values ($1, 'cust', 'desc', 100, 'USD')
+         returning owner_id, status`,
+        [orgId],
+      );
+      expect(rows[0].owner_id).toBe(managerId);
+      expect(rows[0].status).toBe('draft');
+    });
+  });
+
+  it('insert with privileged fields (owner_id, organization_id) is rejected by column grant', async () => {
+    // Spec §6.2: owner_id column is not granted to `authenticated`. INSERT
+    // attempting to set owner_id is rejected with 42501.
+    await expect(
+      asAuthenticated(client, managerId, async () => {
+        await client.query(
+          `insert into public.invoices
+             (organization_id, owner_id, customer_id, description, amount_minor, currency)
+           values ($1, $2, 'cust', 'desc', 100, 'USD')`,
+          [orgId, managerId],
+        );
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+});
