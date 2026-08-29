@@ -28,7 +28,7 @@ import { loadEnv } from '../src/config/env';
 import { mintTestToken, signIn } from './helpers/auth';
 import { SEED_IDENTITIES, SEED_IDS } from './helpers/seed-identities';
 import { AuditService } from '../src/audit/audit.service';
-import { HealthService } from '../src/health/health.service';
+import { HEALTH_CLIENT } from '../src/health/health.service';
 
 const HAS_DB = !!process.env.DATABASE_URL;
 
@@ -133,14 +133,19 @@ describe('AppModule (e2e)', () => {
   });
 
   it('5) /health returns 503 dependency_unavailable when DB unreachable', async () => {
-    // Simulate DB failure by mocking HealthService to throw.
-    // Using overrideProvider avoids recreating the app with a fake DATABASE_URL,
-    // which would fail loadEnv validation (DATABASE_URL is not a known env key).
+    // Simulate DB failure by overriding HEALTH_CLIENT (the injected DB probe client).
+    // HealthModule does not export HealthService, so we override its injected
+    // HEALTH_CLIENT dependency instead.  This avoids a fake DATABASE_URL which
+    // would fail loadEnv validation (DATABASE_URL is no longer a known env key).
     const moduleFixture2 = await Test.createTestingModule({
       imports: [AppModule],
     })
-      .overrideProvider(HealthService)
-      .useValue({ check: jest.fn().mockRejectedValue(new Error('db_unreachable')) })
+      .overrideProvider(HEALTH_CLIENT)
+      .useValue({
+        rpc: () => ({
+          abortSignal: () => Promise.reject(new Error('db_unreachable')),
+        }),
+      })
       .compile();
     const app2 = moduleFixture2.createNestApplication({ logger: false });
     applyEdge(app2, loadEnv(process.env));
