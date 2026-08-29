@@ -17,9 +17,11 @@ const DOMAIN_TABLES = [
 ] as const;
 
 // ----------------------------------------------------------------------------
-// Role + JWT helpers. SET LOCAL ROLE only lasts for the current transaction,
-// so we always BEGIN / ROLLBACK around the boundary. SET LOCAL config keys
-// drive auth.uid()/auth.role() via the stub in apps/api/test/sql/000_auth_stub.sql.
+// Role + JWT helpers for direct pg RLS testing. SET LOCAL ROLE only lasts for
+// the current transaction, so we always BEGIN / ROLLBACK around the boundary.
+// SET LOCAL config keys drive auth.uid()/auth.role() GUCs directly; the
+// superuser connection bypasses RLS on auth schema but domain-table RLS is
+// enforced normally (auth.users has no policies so inserts need explicit ids).
 // ----------------------------------------------------------------------------
 async function asAuthenticated(
   client: Client,
