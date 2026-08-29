@@ -16,6 +16,7 @@ import { JsonDepthMiddleware, DEPTH_LIMIT_TOKEN } from './json-depth.middleware'
 import { AccessLogInterceptor } from './access-log.interceptor';
 import { RateLimitMiddleware } from './rate-limit.middleware';
 
+import { AuditModule } from '../audit/audit.module';
 import { ConfigModule } from '../config/config.module';
 import type { Env } from '../config/env';
 
@@ -26,7 +27,7 @@ const DEPTH_LIMIT_FACTORY = {
 };
 
 @Module({
-  imports: [ConfigModule],
+  imports: [AuditModule, ConfigModule],
   providers: [
     DEPTH_LIMIT_FACTORY,
     RequestIdMiddleware,

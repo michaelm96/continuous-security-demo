@@ -27,6 +27,7 @@ import { applyEdge } from '../src/common/bootstrap-app';
 import { loadEnv } from '../src/config/env';
 import { mintTestToken, signIn } from './helpers/auth';
 import { SEED_IDENTITIES, SEED_IDS } from './helpers/seed-identities';
+import { AuditService } from '../src/audit/audit.service';
 
 const HAS_DB = !!process.env.DATABASE_URL;
 
@@ -35,9 +36,17 @@ describe('AppModule (e2e)', () => {
   let moduleFixture: TestingModule;
 
   beforeEach(async () => {
+    // Mock AuditService so the happy 400 path returns 400 (not 503) in
+    // the dev env where the fake SUPABASE_URL cannot reach PostgREST.
+    // Every spec-mandated 400 MUST trigger an audit (Spec §5.2.6); the
+    // dedicated fail-closed test below overrides the mock to throw and
+    // verifies 503 audit_unavailable (Spec §10.4).
     moduleFixture = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(AuditService)
+      .useValue({ record: jest.fn().mockResolvedValue(undefined) })
+      .compile();
     app = moduleFixture.createNestApplication({ logger: false });
     applyEdge(app, loadEnv(process.env));
     await app.init();
@@ -609,6 +618,52 @@ describe('AppModule (e2e)', () => {
         .patch(`${orgPath}/${SEED_IDS.alphaUserAInvoiceDraft}`)
         .send({ status: 'issued' });
       expect([401, 503]).toContain(res.status);
+    });
+  });
+
+  // ===========================================================================
+  // Task 8 — Mandatory audit writes (Spec §5.2.6 / §10.4). Every 400 MUST
+  // trigger an AuditService.record call. If the audit write fails, the
+  // 400 is replaced with 503 audit_unavailable (fail-closed).
+  //
+  // The default beforeEach above mocks AuditService to succeed so the
+  // happy 400 path works. This test overrides the mock to throw, which
+  // proves the fail-closed branch is wired through ProblemDetailsFilter.
+  // ===========================================================================
+  describe('Task 8: mandatory audit unavailability fail-closed', () => {
+    it('returns 503 audit_unavailable when AuditService.record throws', async () => {
+      const moduleFixture2 = await Test.createTestingModule({
+        imports: [AppModule],
+      })
+        .overrideProvider(AuditService)
+        .useValue({
+          record: jest.fn().mockRejectedValue(new Error('audit_unavailable')),
+        })
+        .compile();
+      const app2 = moduleFixture2.createNestApplication({ logger: false });
+      applyEdge(app2, loadEnv(process.env));
+      await app2.init();
+      try {
+        const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+        // { role: 'superuser' } is rejected by the whitelist → ValidationPipe
+        // throws BadRequestException(400). ProblemDetailsFilter audits the
+        // 400, the mocked AuditService.record rejects, the filter
+        // substitutes 503 audit_unavailable. Using a DTO-rejected body is
+        // necessary: a valid body (e.g. { role: 'user' }) would pass the
+        // whitelist and reach the controller, which throws 404
+        // NotFoundException (controller-level rejection, never audited) in
+        // the dev env where the caller-scoped Supabase query fails.
+        const res = await request(app2.getHttpServer())
+          .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ role: 'superuser' });
+        expect(res.status).toBe(503);
+        expect(res.body.code).toBe('audit_unavailable');
+        expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
+        expect(res.body.requestId).toBeDefined();
+      } finally {
+        await app2.close();
+      }
     });
   });
 });

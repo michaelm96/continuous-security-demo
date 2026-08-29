@@ -10,7 +10,18 @@
 // - PayloadTooLargeError (.status === 413) → validation_failed
 // - Anything else → internal (logged once via pino; no stack in production)
 //
-// Always sets X-Request-Id and application/problem+json content type.
+// Audit on 400 (Spec §5.2.6 / §10.4): every 400 must be audited through
+// AuditService. If the audit write fails, the 400 is replaced with 503
+// audit_unavailable (fail-closed). We do not try to distinguish a
+// ValidationPipe DTO failure from a service-thrown BadRequestException —
+// the spec mandates a mandatory audit for every 400, and the cost of a
+// double-audit (when a service has already recorded the rejection) is
+// acceptable noise compared to the cost of skipping the audit on a path
+// the filter cannot reliably identify. `req.auditRecorded` remains on the
+// request type for future services that want to flag it, but the filter
+// does not act on it. The audit event uses only safe context:
+// req.requestId, req.method, req.route.path, req.params and the validated
+// detail string. Bearer token, headers, and body are NEVER read.
 
 import {
   ArgumentsHost,
@@ -25,11 +36,20 @@ import type { Logger as PinoLogger } from 'pino';
 
 import { problemDetails, problemDetailsFromStatus } from './problem-details';
 import { PINO_LOGGER, NODE_ENV } from '../config/config.module';
+import { AuditService, AUDIT_UNAVAILABLE } from '../audit/audit.service';
 
 interface StatusedError {
   status?: number;
   type?: string;
 }
+
+interface RequestWithAudit extends Request {
+  requestId?: string;
+  principal?: { userId: string };
+  auditRecorded?: boolean;
+}
+
+const DETAIL_MAX = 200;
 
 @Injectable()
 @Catch()
@@ -37,9 +57,10 @@ export class ProblemDetailsFilter implements ExceptionFilter {
   constructor(
     @Inject(PINO_LOGGER) private readonly logger: PinoLogger,
     @Inject(NODE_ENV) private readonly nodeEnv: string,
+    private readonly audit: AuditService,
   ) {}
 
-  catch(exception: unknown, host: ArgumentsHost): void {
+  async catch(exception: unknown, host: ArgumentsHost): Promise<void> {
     const ctx = host.switchToHttp();
     const req = ctx.getRequest<Request & { requestId?: string }>();
     const res = ctx.getResponse<Response>();
@@ -78,6 +99,17 @@ export class ProblemDetailsFilter implements ExceptionFilter {
         return;
       }
       if (status === 400) {
+        // Mandatory audit on every 400 (Spec §5.2.6). Fail-closed: a
+        // write failure replaces the 400 with 503 audit_unavailable.
+        try {
+          await this.auditValidationFailure(req as RequestWithAudit, detail ?? '');
+        } catch {
+          // Audit unavailable — fail closed (Spec §10.4). Emit 503 in
+          // place of the 400; the original validation result is discarded.
+          const pd503 = problemDetails('AUDIT_UNAVAILABLE', requestId);
+          res.status(pd503.status).json(pd503);
+          return;
+        }
         const pd = problemDetails('VALIDATION_FAILED', requestId, detail);
         res.status(pd.status).json(pd);
         return;
@@ -157,5 +189,39 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     }
     const pd = problemDetails('INTERNAL', requestId);
     res.status(pd.status).json(pd);
+  }
+
+  // Records a DTO-validation rejection audit. Safe context only:
+  // req.requestId, req.method, req.route.path, req.params, and detail.
+  // Bearer token / Authorization header / body are NEVER read.
+  private async auditValidationFailure(
+    req: RequestWithAudit,
+    detail: string,
+  ): Promise<void> {
+    const truncated =
+      detail.length > DETAIL_MAX ? detail.slice(0, DETAIL_MAX) : detail;
+    const organizationId =
+      typeof req.params?.organizationId === 'string'
+        ? req.params.organizationId
+        : null;
+    const targetType = req.route?.path
+      ? `${req.method} ${req.route.path}`
+      : 'unknown';
+    try {
+      await this.audit.record({
+        actorId: req.principal?.userId ?? null,
+        organizationId,
+        action: 'api.validation',
+        targetType,
+        targetId: null,
+        result: 'rejected',
+        correlationId: req.requestId ?? 'unknown',
+        metadata: { code: 'validation_failed', detail: truncated },
+      });
+    } catch (err) {
+      // Mandatory audit failed → fail closed (Spec §10.4). Re-throw so the
+      // caller's branch substitutes a 503 audit_unavailable response below.
+      throw err instanceof Error ? err : new Error(AUDIT_UNAVAILABLE);
+    }
   }
 }
