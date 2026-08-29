@@ -9,12 +9,13 @@ import { Module } from '@nestjs/common';
 
 import { AuditModule } from '../audit/audit.module';
 import { AuthModule } from '../auth/auth.module';
+import { ConfigModule } from '../config/config.module';
 import { DatabaseModule } from '../database/database.module';
 import { MembershipService } from './membership.service';
 import { OrganizationsController } from './organizations.controller';
 
 @Module({
-  imports: [AuditModule, AuthModule, DatabaseModule],
+  imports: [AuditModule, AuthModule, ConfigModule, DatabaseModule],
   controllers: [OrganizationsController],
   providers: [MembershipService],
   exports: [MembershipService],

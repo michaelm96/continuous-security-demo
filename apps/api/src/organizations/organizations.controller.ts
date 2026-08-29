@@ -25,6 +25,7 @@ import {
 
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentPrincipal } from '../auth/current-principal.decorator';
+import { CurrentRequestId } from '../common/current-request-id.decorator';
 import type { Principal } from '../auth/principal';
 import { PatchMembershipDto } from './dto/patch-membership.dto';
 import {
@@ -56,6 +57,7 @@ export class OrganizationsController {
   @Patch(':organizationId/members/:userId')
   async updateMember(
     @CurrentPrincipal() principal: Principal,
+    @CurrentRequestId() requestId: string,
     @Param('organizationId') organizationId: string,
     @Param('userId') userId: string,
     @Body() patch: PatchMembershipDto,
@@ -65,6 +67,7 @@ export class OrganizationsController {
       organizationId,
       userId,
       patch,
+      requestId,
     );
   }
 }

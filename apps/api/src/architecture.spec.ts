@@ -25,6 +25,8 @@ const DOMAIN_CHILDREN = [
   'common',
   'database',
   'health',
+  'invoices',
+  'organizations',
 ];
 
 function walk(dir: string, out: string[] = []): string[] {

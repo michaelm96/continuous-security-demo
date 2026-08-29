@@ -38,9 +38,11 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import type { Logger as PinoLogger } from 'pino';
 
 import { CALLER_CLIENT, type CallerClient } from '../database/caller-client';
 import { AuditService, AUDIT_UNAVAILABLE } from '../audit/audit.service';
+import { PINO_LOGGER } from '../config/config.module';
 import type { Principal } from '../auth/principal';
 import type { PatchMembershipDto } from './dto/patch-membership.dto';
 
@@ -75,6 +77,7 @@ export class MembershipService {
   constructor(
     @Inject(CALLER_CLIENT) private readonly caller: CallerClient,
     private readonly audit: AuditService,
+    @Inject(PINO_LOGGER) private readonly logger: PinoLogger,
   ) {}
 
   // -------- Load --------
@@ -153,6 +156,7 @@ export class MembershipService {
     organizationId: string,
     userId: string,
     patch: PatchMembershipDto,
+    requestId: string,
   ): Promise<MembershipRow> {
     // Explicit empty-patch rejection. The global whitelist would silently
     // accept `{ role: undefined, status: undefined }` because every
@@ -168,7 +172,7 @@ export class MembershipService {
     // Role check: must be active organization_admin of the URL org.
     const own = await this.loadActiveMembership(principal, organizationId);
     if (own.role !== 'organization_admin') {
-      await this.auditRejection(principal, organizationId, userId, 'forbidden');
+      await this.auditRejection(principal, organizationId, userId, requestId, 'forbidden');
       throw new ForbiddenException();
     }
 
@@ -209,6 +213,7 @@ export class MembershipService {
           principal,
           organizationId,
           userId,
+          requestId,
           'last_admin',
         );
         throw new ConflictException({
@@ -241,6 +246,7 @@ export class MembershipService {
           principal,
           organizationId,
           userId,
+          requestId,
           'last_admin',
         );
         throw new ConflictException({
@@ -267,14 +273,17 @@ export class MembershipService {
         targetType: 'membership',
         targetId: userId,
         result: 'success',
-        correlationId: 'unknown',
+        correlationId: requestId,
         metadata: {
           role: patch.role ?? null,
           status: patch.status ?? null,
         },
       });
-    } catch {
-      // best-effort; success audit failure does not fail the request
+    } catch (err) {
+      this.logger.warn(
+        { err, requestId, action: 'membership.update' },
+        'success audit failed',
+      );
     }
 
     return {
@@ -290,6 +299,7 @@ export class MembershipService {
     principal: Principal,
     organizationId: string,
     userId: string,
+    requestId: string,
     code: string,
   ): Promise<void> {
     try {
@@ -300,7 +310,7 @@ export class MembershipService {
         targetType: 'membership',
         targetId: userId,
         result: 'rejected',
-        correlationId: 'unknown',
+        correlationId: requestId,
         metadata: { code },
       });
     } catch {

@@ -63,7 +63,13 @@ describe('InvoiceService — membership gate runs BEFORE invoice query', () => {
     const audit = {
       record: jest.fn().mockResolvedValue(undefined),
     } as unknown as AuditService;
-    const service = new InvoiceService(caller, memberships, audit);
+    const logger = {
+      warn: jest.fn(),
+      info: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+    } as any;
+    const service = new InvoiceService(caller, memberships, audit, logger);
     return { service, caller, memberships, audit, queryMock };
   }
 

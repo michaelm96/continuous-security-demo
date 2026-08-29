@@ -32,9 +32,11 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import type { Logger as PinoLogger } from 'pino';
 
 import { CALLER_CLIENT, type CallerClient } from '../database/caller-client';
 import { AuditService, AUDIT_UNAVAILABLE } from '../audit/audit.service';
+import { PINO_LOGGER } from '../config/config.module';
 import type { Principal } from '../auth/principal';
 import { MembershipService } from '../organizations/membership.service';
 import { canTransitionInvoice, type InvoiceStatus } from './invoice-state';
@@ -91,6 +93,7 @@ export class InvoiceService {
     @Inject(CALLER_CLIENT) private readonly caller: CallerClient,
     private readonly memberships: MembershipService,
     private readonly audit: AuditService,
+    @Inject(PINO_LOGGER) private readonly logger: PinoLogger,
   ) {}
 
   // -------- List --------
@@ -255,10 +258,12 @@ export class InvoiceService {
         metadata: {},
       });
     } catch (err) {
-      if (err instanceof Error && err.message === AUDIT_UNAVAILABLE) {
-        throw new ServiceUnavailableException({ code: 'audit_unavailable' });
-      }
-      throw new ServiceUnavailableException({ code: 'audit_unavailable' });
+      // Best-effort: a committed change is durable; an audit-write failure
+      // must not produce a phantom-write retry. Log and continue.
+      this.logger.warn(
+        { err, requestId, action },
+        'success audit failed',
+      );
     }
   }
 
