@@ -1,0 +1,22 @@
+{
+  "name": "continuous-security-demo",
+  "private": true,
+  "packageManager": "npm@12.0.2",
+  "engines": {
+    "node": ">=26.8.1 <27",
+    "npm": ">=12.0.2 <13"
+  },
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test:unit -w @continuous-security-demo/api && npm run test:rls -w @continuous-security-demo/api && npm run test:e2e -w @continuous-security-demo/api",
+    "supabase:start": "supabase start",
+    "supabase:reset": "supabase db reset"
+  },
+  "devDependencies": {
+    "supabase": "2.116.0"
+  }
+}
