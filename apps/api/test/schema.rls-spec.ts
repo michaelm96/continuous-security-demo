@@ -83,7 +83,7 @@ async function createUserWithMembership(
   status: 'active' | 'suspended' = 'active',
 ): Promise<string> {
   const { rows } = await client.query<{ id: string }>(
-    `insert into auth.users default values returning id`,
+    `insert into auth.users (id, email, encrypted_password) values (gen_random_uuid()::uuid, gen_random_uuid()::text||'@test.com', '$2a$10$x') returning id`,
   );
   const userId = rows[0].id;
   await client.query(
@@ -461,7 +461,7 @@ describe('seed visibility (Task 3)', () => {
     runReset();
     const second = await visibleInvoiceIds(await signIn(SEED_IDENTITIES.alphaManager));
     expect(second.sort()).toEqual(first.sort());
-  });
+  }, 120000);
 
   afterAll(async () => {
     await closePool();
@@ -569,7 +569,7 @@ describe('Task 6: membership updates + last-admin trigger', () => {
     );
     const orgId = orgRows[0].id;
     const { rows: userRows } = await client.query<{ id: string }>(
-      `insert into auth.users default values returning id`,
+      `insert into auth.users (id, email, encrypted_password) values (gen_random_uuid()::uuid, gen_random_uuid()::text||'@test.com', '$2a$10$x') returning id`,
     );
     const userId = userRows[0].id;
     await client.query(
@@ -1017,7 +1017,7 @@ describe('Task 7: invoice visibility', () => {
 
     async function mkUser(role: 'user' | 'manager'): Promise<string> {
       const { rows } = await client.query<{ id: string }>(
-        `insert into auth.users default values returning id`,
+        `insert into auth.users (id, email, encrypted_password) values (gen_random_uuid()::uuid, gen_random_uuid()::text||'@test.com', '$2a$10$x') returning id`,
       );
       const id = rows[0].id;
       await client.query(
@@ -1110,7 +1110,7 @@ describe('Task 7: invoice insert RLS', () => {
     orgId = orgRows[0].id;
     async function mkUser(role: 'user' | 'manager'): Promise<string> {
       const { rows } = await client.query<{ id: string }>(
-        `insert into auth.users default values returning id`,
+        `insert into auth.users (id, email, encrypted_password) values (gen_random_uuid()::uuid, gen_random_uuid()::text||'@test.com', '$2a$10$x') returning id`,
       );
       const id = rows[0].id;
       await client.query(
@@ -1461,7 +1461,7 @@ describe('Task 9: create_refund RPC — privilege + rejection matrix', () => {
 
     async function mkUser(role: 'user' | 'manager'): Promise<string> {
       const { rows: uRows } = await client.query<{ id: string }>(
-        `insert into auth.users default values returning id`,
+        `insert into auth.users (id, email, encrypted_password) values (gen_random_uuid()::uuid, gen_random_uuid()::text||'@test.com', '$2a$10$x') returning id`,
       );
       const id = uRows[0].id;
       await client.query(

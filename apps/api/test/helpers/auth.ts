@@ -33,11 +33,17 @@ export function callerClient(accessToken: string): SupabaseClient {
 }
 
 // Deprecated: RLS tests should use callerClient() or withPrivilegedTransaction()
-export async function visibleInvoiceIds(_token: string): Promise<string[]> {
-  throw new Error('visibleInvoiceIds is deprecated - use callerClient() with Supabase queries');
+export async function visibleInvoiceIds(token: string): Promise<string[]> {
+  const client = callerClient(token);
+  const { data, error } = await client.from('invoices').select('id');
+  if (error) throw new Error(`visibleInvoiceIds failed: ${error.message}`);
+  return (data ?? []).map((r: { id: string }) => r.id);
 }
 
 // Deprecated: RLS tests should use callerClient().auth.getUser()
-export async function decodeAccessToken(_token: string): Promise<{ sub: string; role: string; aud: string }> {
-  throw new Error('decodeAccessToken is deprecated - use callerClient().auth.getUser()');
+export async function decodeAccessToken(token: string): Promise<{ sub: string; role: string; aud: string }> {
+  const client = callerClient(token);
+  const { data, error } = await client.auth.getUser(token);
+  if (error) throw new Error(`decodeAccessToken failed: ${error.message}`);
+  return { sub: data.user.id, role: data.user.role ?? 'authenticated', aud: 'authenticated' };
 }
