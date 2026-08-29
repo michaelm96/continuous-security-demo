@@ -1,10 +1,11 @@
 // Unit tests for ProblemDetailsFilter's audit-on-400 behavior.
 //
-// Spec §5.2.6 / §10.4: every 400 MUST be audited through AuditService.
-// If the audit write fails, the response is replaced with 503
-// audit_unavailable. The filter does not try to distinguish ValidationPipe
-// DTO failures from service-thrown BadRequestExceptions; double-audit is
-// accepted noise (round-2 brief, "minimum diff" decision).
+// Spec §5.2.6 / §10.4: every 400 must be audited through AuditService
+// unless the originating service already stamped `req.auditRecorded = true`
+// before throwing (services that throw audited rejections directly set the
+// flag so the filter does not double-emit). If the audit write fails, the
+// response is replaced with 503 audit_unavailable (fail-closed). The 413
+// oversize-body path flows through the same audit-or-fail-closed branch.
 
 import {
   BadRequestException,
@@ -142,11 +143,13 @@ describe('ProblemDetailsFilter — audit-on-400', () => {
     expect(call.actorId).toBe('user-abc');
   });
 
-  it('always audits on 400 even when req.auditRecorded is already true (no short-circuit)', async () => {
-    // Spec §5.2.6: every 400 must be audited. The filter does NOT honor
-    // req.auditRecorded as a skip flag — services that already audited
-    // their domain error will get a second row in audit_events. This is
-    // accepted noise (round-2 brief, "minimum diff" decision).
+  it('skips audit on 400 when req.auditRecorded is true (service already audited)', async () => {
+    // Spec §5.2.6 leaves room for services that already recorded their own
+    // rejection audit before throwing 400. They stamp
+    // `req.auditRecorded = true` on the request; the filter honors the
+    // flag and does not emit a second row. The response itself is still
+    // emitted (the filter is not the audit source — only an enforcement
+    // layer for the mandatory case).
     const audit = {
       record: jest.fn().mockResolvedValue(undefined),
     } as unknown as AuditService;
@@ -156,7 +159,7 @@ describe('ProblemDetailsFilter — audit-on-400', () => {
 
     await filter.catch(new BadRequestException('bad'), makeArgsHost(req, res) as never);
 
-    expect((audit.record as jest.Mock).mock.calls).toHaveLength(1);
+    expect((audit.record as jest.Mock).mock.calls).toHaveLength(0);
     expect(res.statusCode).toBe(400);
   });
 
@@ -169,6 +172,77 @@ describe('ProblemDetailsFilter — audit-on-400', () => {
     const res = makeRes();
 
     await filter.catch(new BadRequestException('bad'), makeArgsHost(req, res) as never);
+
+    expect(res.statusCode).toBe(503);
+    expect(res.body).toMatchObject({
+      status: 503,
+      code: 'audit_unavailable',
+      requestId: 'req-123',
+    });
+  });
+
+  it('logs one redacted line when audit write fails (without token/headers/body)', async () => {
+    const audit = {
+      record: jest.fn().mockRejectedValue(new Error(AUDIT_UNAVAILABLE)),
+    } as unknown as AuditService;
+    const filter = makeFilter(audit);
+    const req = makeReq({
+      headers: {
+        authorization: 'Bearer should-not-leak-xyz',
+      } as never,
+    });
+    const res = makeRes();
+
+    // baseDeps.logger.error is shared across tests in this describe block
+    // (Jest does not auto-reset module-level mocks). Clear it so this
+    // assertion observes only the log emitted by THIS filter.catch call.
+    (baseDeps.logger.error as jest.Mock).mockClear();
+
+    await filter.catch(new BadRequestException('bad'), makeArgsHost(req, res) as never);
+
+    const errorCalls = (baseDeps.logger.error as jest.Mock).mock.calls;
+    expect(errorCalls).toHaveLength(1);
+    const logPayload = JSON.stringify(errorCalls[0]);
+    expect(logPayload).not.toContain('should-not-leak-xyz');
+    expect(logPayload).not.toContain('Bearer');
+    expect(logPayload).toContain('audit_unavailable');
+    expect(logPayload).toContain('req-123');
+  });
+
+  it('audits 413 oversize body as 400 validation_failed and fails closed', async () => {
+    // Spec §5.2.6 — every 400 must be audited, and the 413 branch maps to a
+    // 400 response. The oversize path must therefore go through the same
+    // audit-or-fail-closed branch (round-2 Critical finding).
+    const audit = {
+      record: jest.fn().mockResolvedValue(undefined),
+    } as unknown as AuditService;
+    const filter = makeFilter(audit);
+    const req = makeReq();
+    const res = makeRes();
+
+    const exc = { status: 413, type: 'entity.too.large' } as unknown as Error;
+    await filter.catch(exc, makeArgsHost(req, res) as never);
+
+    expect((audit.record as jest.Mock).mock.calls).toHaveLength(1);
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toMatchObject({
+      status: 400,
+      code: 'validation_failed',
+      requestId: 'req-123',
+      detail: 'oversize_body',
+    });
+  });
+
+  it('replaces 413-derived 400 with 503 audit_unavailable when audit fails', async () => {
+    const audit = {
+      record: jest.fn().mockRejectedValue(new Error(AUDIT_UNAVAILABLE)),
+    } as unknown as AuditService;
+    const filter = makeFilter(audit);
+    const req = makeReq();
+    const res = makeRes();
+
+    const exc = { status: 413, type: 'entity.too.large' } as unknown as Error;
+    await filter.catch(exc, makeArgsHost(req, res) as never);
 
     expect(res.statusCode).toBe(503);
     expect(res.body).toMatchObject({
@@ -216,7 +290,7 @@ describe('ProblemDetailsFilter — audit-on-400', () => {
     expect(call.targetType).toBe('unknown');
   });
 
-  it('does not audit on 404 / 403 / 401 (only 400)', async () => {
+  it('does not audit on 404 / 403 / 401 (only 400 + 413)', async () => {
     const audit = {
       record: jest.fn().mockResolvedValue(undefined),
     } as unknown as AuditService;

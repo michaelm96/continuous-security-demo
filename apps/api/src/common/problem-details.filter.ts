@@ -11,17 +11,16 @@
 // - Anything else → internal (logged once via pino; no stack in production)
 //
 // Audit on 400 (Spec §5.2.6 / §10.4): every 400 must be audited through
-// AuditService. If the audit write fails, the 400 is replaced with 503
-// audit_unavailable (fail-closed). We do not try to distinguish a
-// ValidationPipe DTO failure from a service-thrown BadRequestException —
-// the spec mandates a mandatory audit for every 400, and the cost of a
-// double-audit (when a service has already recorded the rejection) is
-// acceptable noise compared to the cost of skipping the audit on a path
-// the filter cannot reliably identify. `req.auditRecorded` remains on the
-// request type for future services that want to flag it, but the filter
-// does not act on it. The audit event uses only safe context:
-// req.requestId, req.method, req.route.path, req.params and the validated
-// detail string. Bearer token, headers, and body are NEVER read.
+// AuditService unless the originating service already stamped
+// `req.auditRecorded = true` before throwing (services that throw audited
+// rejections directly set the flag so the filter does not double-emit).
+// If the audit write fails, the 400 is replaced with 503 audit_unavailable
+// (fail-closed). All 400 responses — whether from ValidationPipe, an
+// oversize-body rejection, or a service-thrown BadRequestException — flow
+// through the same path so the invariant is enforced uniformly. The audit
+// event uses only safe context: req.requestId, req.method, req.route.path,
+// req.params and the validated detail string. Bearer token, headers, and
+// body are NEVER read.
 
 import {
   ArgumentsHost,
@@ -69,6 +68,21 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     res.setHeader('X-Request-Id', requestId);
     res.setHeader('Content-Type', 'application/problem+json');
 
+    // A service that has already recorded its own rejection audit can
+    // set `error.auditRecorded = true` on the thrown exception to tell
+    // the filter to skip its own mandatory-audit row (Plan Task 8
+    // Step 4 — "services that already audited should not be
+    // double-audited"). We mirror the flag onto the request so the
+    // single check inside `respond()` covers both attachment points.
+    const reqWithAudit = req as RequestWithAudit;
+    if (
+      exception !== null &&
+      typeof exception === 'object' &&
+      (exception as { auditRecorded?: unknown }).auditRecorded === true
+    ) {
+      reqWithAudit.auditRecorded = true;
+    }
+
     // Body-parser oversize body: error has .status === 413 and
     // .type === 'entity.too.large'. Express body-parser throws these without
     // a prototype link to HttpException, so check the duck-typed status.
@@ -77,8 +91,12 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       typeof exception === 'object' &&
       (exception as StatusedError).status === 413
     ) {
-      const pd = problemDetails('VALIDATION_FAILED', requestId, 'oversize_body');
-      res.status(pd.status).json(pd);
+      await this.respond(
+        req as RequestWithAudit,
+        res,
+        problemDetails('VALIDATION_FAILED', requestId, 'oversize_body'),
+        'oversize_body',
+      );
       return;
     }
 
@@ -94,46 +112,74 @@ export class ProblemDetailsFilter implements ExceptionFilter {
 
       if (status === 404) {
         // No detail: keeps the requested path out of the response body.
-        const pd = problemDetails('NOT_FOUND', requestId);
-        res.status(pd.status).json(pd);
+        await this.respond(
+          req as RequestWithAudit,
+          res,
+          problemDetails('NOT_FOUND', requestId),
+        );
         return;
       }
       if (status === 400) {
         // Mandatory audit on every 400 (Spec §5.2.6). Fail-closed: a
         // write failure replaces the 400 with 503 audit_unavailable.
-        try {
-          await this.auditValidationFailure(req as RequestWithAudit, detail ?? '');
-        } catch {
-          // Audit unavailable — fail closed (Spec §10.4). Emit 503 in
-          // place of the 400; the original validation result is discarded.
-          const pd503 = problemDetails('AUDIT_UNAVAILABLE', requestId);
-          res.status(pd503.status).json(pd503);
-          return;
-        }
-        const pd = problemDetails('VALIDATION_FAILED', requestId, detail);
-        res.status(pd.status).json(pd);
+        // 400 covers three codes per Spec §10.1: VALIDATION_FAILED
+        // (ValidationPipe / oversize body / service-thrown
+        // BadRequestException), INVALID_AMOUNT (defence-in-depth path
+        // when a refund row bypasses the DTO), and CURRENCY_MISMATCH
+        // (same). Trust the explicit code from the exception body when
+        // present; default to VALIDATION_FAILED. `respond` handles both
+        // audit + write and honors req.auditRecorded when a service
+        // already recorded the rejection.
+        const code =
+          typeof body === 'object' &&
+          body !== null &&
+          'code' in body &&
+          typeof (body as { code: unknown }).code === 'string'
+            ? ((body as { code: string }).code)
+            : 'validation_failed';
+        const codeKey =
+          code === 'invalid_amount'
+            ? 'INVALID_AMOUNT'
+            : code === 'currency_mismatch'
+              ? 'CURRENCY_MISMATCH'
+              : 'VALIDATION_FAILED';
+        await this.respond(
+          req as RequestWithAudit,
+          res,
+          problemDetails(codeKey, requestId, detail),
+          detail ?? '',
+        );
         return;
       }
       if (status === 401) {
-        const pd = problemDetails('UNAUTHENTICATED', requestId, detail);
-        res.status(pd.status).json(pd);
+        await this.respond(
+          req as RequestWithAudit,
+          res,
+          problemDetails('UNAUTHENTICATED', requestId, detail),
+        );
         return;
       }
       if (status === 403) {
-        const pd = problemDetails('FORBIDDEN', requestId, detail);
-        res.status(pd.status).json(pd);
+        await this.respond(
+          req as RequestWithAudit,
+          res,
+          problemDetails('FORBIDDEN', requestId, detail),
+        );
         return;
       }
       if (status === 429) {
-        const pd = problemDetails('THROTTLED', requestId, detail);
-        res.status(pd.status).json(pd);
+        await this.respond(
+          req as RequestWithAudit,
+          res,
+          problemDetails('THROTTLED', requestId, detail),
+        );
         return;
       }
       if (status === 409) {
         // 409 can mean last_admin (Task 6), invalid_state (Task 2 trigger),
-        // idempotency_conflict / over_refund (Task 9), or validation_failed
-        // for same-key conflicts. Trust the explicit code from the exception
-        // body when present.
+        // or idempotency_conflict / over_refund (Task 9). Trust the explicit
+        // code from the exception body when present. `currency_mismatch` is
+        // 400 per Spec §10.1, not 409, and is never raised with status 409.
         const code =
           typeof body === 'object' &&
           body !== null &&
@@ -151,8 +197,11 @@ export class ProblemDetailsFilter implements ExceptionFilter {
                 : code === 'validation_failed'
                   ? 'VALIDATION_FAILED'
                   : 'INVALID_STATE';
-        const pd = problemDetails(codeKey, requestId, detail);
-        res.status(pd.status).json(pd);
+        await this.respond(
+          req as RequestWithAudit,
+          res,
+          problemDetails(codeKey, requestId, detail),
+        );
         return;
       }
       if (status === 503) {
@@ -166,16 +215,22 @@ export class ProblemDetailsFilter implements ExceptionFilter {
           typeof (body as { code: unknown }).code === 'string'
             ? ((body as { code: string }).code)
             : 'dependency_unavailable';
-        const pd = problemDetails(
-          code === 'audit_unavailable' ? 'AUDIT_UNAVAILABLE' : 'DEPENDENCY_UNAVAILABLE',
-          requestId,
-          detail,
+        await this.respond(
+          req as RequestWithAudit,
+          res,
+          problemDetails(
+            code === 'audit_unavailable' ? 'AUDIT_UNAVAILABLE' : 'DEPENDENCY_UNAVAILABLE',
+            requestId,
+            detail,
+          ),
         );
-        res.status(pd.status).json(pd);
         return;
       }
-      const pd = problemDetailsFromStatus(status, requestId, detail);
-      res.status(pd.status).json(pd);
+      await this.respond(
+        req as RequestWithAudit,
+        res,
+        problemDetailsFromStatus(status, requestId, detail),
+      );
       return;
     }
 
@@ -187,7 +242,44 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     } else {
       this.logger.error({ requestId, code: 'internal' }, 'internal error');
     }
-    const pd = problemDetails('INTERNAL', requestId);
+    await this.respond(
+      req as RequestWithAudit,
+      res,
+      problemDetails('INTERNAL', requestId),
+    );
+  }
+
+  // Centralized write path. Enforces the mandatory-audit invariant for any
+  // 400 response (Spec §5.2.6) and emits one redacted log line if the
+  // audit write fails (Spec §10.4 — visibility into a degraded mode).
+  // Services that already record their own rejection audit must set
+  // `req.auditRecorded = true` on the request before throwing, which this
+  // method honors to avoid a double-emit.
+  private async respond(
+    req: RequestWithAudit,
+    res: Response,
+    pd: { status: number; title: string; code: string; requestId: string; detail?: string },
+    detailForAudit?: string,
+  ): Promise<void> {
+    if (pd.status === 400 && !req.auditRecorded) {
+      try {
+        await this.auditValidationFailure(req, detailForAudit ?? '');
+      } catch (err) {
+        // Mandatory audit failed — fail closed (Spec §10.4). Log one
+        // redacted line so operators see the degraded mode; never log
+        // the body, headers, or bearer token.
+        this.logger.error(
+          {
+            requestId: req.requestId,
+            code: AUDIT_UNAVAILABLE,
+          },
+          'required audit persistence failed',
+        );
+        const pd503 = problemDetails('AUDIT_UNAVAILABLE', req.requestId ?? '');
+        res.status(pd503.status).json(pd503);
+        return;
+      }
+    }
     res.status(pd.status).json(pd);
   }
 
@@ -207,21 +299,15 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     const targetType = req.route?.path
       ? `${req.method} ${req.route.path}`
       : 'unknown';
-    try {
-      await this.audit.record({
-        actorId: req.principal?.userId ?? null,
-        organizationId,
-        action: 'api.validation',
-        targetType,
-        targetId: null,
-        result: 'rejected',
-        correlationId: req.requestId ?? 'unknown',
-        metadata: { code: 'validation_failed', detail: truncated },
-      });
-    } catch (err) {
-      // Mandatory audit failed → fail closed (Spec §10.4). Re-throw so the
-      // caller's branch substitutes a 503 audit_unavailable response below.
-      throw err instanceof Error ? err : new Error(AUDIT_UNAVAILABLE);
-    }
+    await this.audit.record({
+      actorId: req.principal?.userId ?? null,
+      organizationId,
+      action: 'api.validation',
+      targetType,
+      targetId: null,
+      result: 'rejected',
+      correlationId: req.requestId ?? 'unknown',
+      metadata: { code: 'validation_failed', detail: truncated },
+    });
   }
 }

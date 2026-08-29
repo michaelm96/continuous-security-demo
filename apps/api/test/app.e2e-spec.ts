@@ -34,18 +34,22 @@ const HAS_DB = !!process.env.DATABASE_URL;
 describe('AppModule (e2e)', () => {
   let app: INestApplication<Server>;
   let moduleFixture: TestingModule;
+  let auditRecord: jest.Mock;
 
   beforeEach(async () => {
     // Mock AuditService so the happy 400 path returns 400 (not 503) in
     // the dev env where the fake SUPABASE_URL cannot reach PostgREST.
     // Every spec-mandated 400 MUST trigger an audit (Spec §5.2.6); the
     // dedicated fail-closed test below overrides the mock to throw and
-    // verifies 503 audit_unavailable (Spec §10.4).
+    // verifies 503 audit_unavailable (Spec §10.4). Tests that want to
+    // assert on the audit payload (e.g. the validation rejection path)
+    // pull `auditRecord` from the closure and inspect call args.
+    auditRecord = jest.fn().mockResolvedValue(undefined);
     moduleFixture = await Test.createTestingModule({
       imports: [AppModule],
     })
       .overrideProvider(AuditService)
-      .useValue({ record: jest.fn().mockResolvedValue(undefined) })
+      .useValue({ record: auditRecord })
       .compile();
     app = moduleFixture.createNestApplication({ logger: false });
     applyEdge(app, loadEnv(process.env));
@@ -663,7 +667,33 @@ describe('AppModule (e2e)', () => {
         expect(res.body.requestId).toBeDefined();
       } finally {
         await app2.close();
+        await moduleFixture2.close();
       }
     });
+  });
+
+  // ===========================================================================
+  // Task 8 — Mandatory audit writes (Spec §5.2.6 / §10.4). Every 400 MUST
+  // trigger an AuditService.record call with the expected payload. This
+  // proves the filter calls `record` with the right shape — earlier
+  // versions of the test inlined the mock value and lost the ability to
+  // assert on the call args.
+  // ===========================================================================
+  it('records an api.validation rejection audit on DTO 400', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+    await request(app.getHttpServer())
+      .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ role: 'superuser' });
+    expect(auditRecord).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'api.validation',
+        result: 'rejected',
+        actorId: expect.any(String),
+        organizationId: SEED_IDS.alphaOrg,
+        targetType: expect.stringContaining('PATCH'),
+        metadata: expect.objectContaining({ code: 'validation_failed' }),
+      }),
+    );
   });
 });

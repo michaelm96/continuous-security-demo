@@ -8,7 +8,7 @@ import {
   Module,
   NestModule,
 } from '@nestjs/common';
-import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 
 import { ProblemDetailsFilter } from './problem-details.filter';
 import { RequestIdMiddleware } from './request-id.middleware';
@@ -35,7 +35,6 @@ const DEPTH_LIMIT_FACTORY = {
     AccessLogInterceptor,
     RateLimitMiddleware,
     ProblemDetailsFilter,
-    { provide: APP_FILTER, useClass: ProblemDetailsFilter },
     { provide: APP_INTERCEPTOR, useClass: AccessLogInterceptor },
   ],
   exports: [ProblemDetailsFilter, AccessLogInterceptor],
