@@ -1,3 +1,13 @@
+-- ============================================================================
+-- TASK-2-ONLY INFRASTRUCTURE — DO NOT SHIP, DO NOT INCLUDE IN PRODUCTION.
+-- This stub mirrors Supabase's auth schema and roles so the Task 2 boundary
+-- tests can run against native Postgres.app (Docker Desktop is broken on
+-- the dev host). When real Supabase Auth lands in Task 4, remove this file
+-- from setup-test-db.sh and from any test pipeline that loads it. The real
+-- Supabase stack provides auth.uid(), auth.role(), auth.jwt(), and the
+-- auth.users table natively.
+-- ============================================================================
+
 -- 1) Roles mirroring Supabase
 do $$
 begin
