@@ -27,6 +27,9 @@ case "$cmd" in
       [ -e "$f" ] || continue
       "$PSQL" -d "$DBNAME" -v ON_ERROR_STOP=1 -f "$f"
     done
+
+    # 4. Apply deterministic seed (idempotent via on conflict do update)
+    "$PSQL" -d "$DBNAME" -v ON_ERROR_STOP=1 -f "$HERE/sql/003_seed.sql"
     ;;
 
   reset)
@@ -40,6 +43,7 @@ case "$cmd" in
       [ -e "$f" ] || continue
       "$PSQL" -d "$DBNAME" -v ON_ERROR_STOP=1 -f "$f"
     done
+    "$PSQL" -d "$DBNAME" -v ON_ERROR_STOP=1 -f "$HERE/sql/003_seed.sql"
     ;;
 
   psql)

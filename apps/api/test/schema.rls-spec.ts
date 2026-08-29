@@ -1,4 +1,8 @@
+import { execSync } from 'node:child_process';
 import { Client } from 'pg';
+import { SEED_IDENTITIES, SEED_IDS } from './helpers/seed-identities';
+import { signIn, visibleInvoiceIds } from './helpers/auth';
+import { closePool } from './helpers/db';
 
 const connectionString = process.env.SUPABASE_DB_URL ?? process.env.DATABASE_URL;
 if (!connectionString) throw new Error('SUPABASE_DB_URL (or DATABASE_URL) is required for RLS tests');
@@ -398,5 +402,68 @@ describe('last-admin trigger', () => {
         );
       }),
     ).rejects.toMatchObject({ message: expect.stringMatching(/last_admin/) });
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Task 3 — visibility against the deterministic seed (apps/api/test/sql/003_seed.sql).
+// These tests require db:seed to have been run. They use caller-scoped RLS
+// queries against public.invoices; the shared SELECT policy is `invoices_select_visible`
+// which branches on active_membership_role(organization_id).
+// ----------------------------------------------------------------------------
+
+describe('seed visibility (Task 3)', () => {
+  function runReset(): void {
+    // Idempotent: db:seed applies auth stub + schema + seed. Safe to re-run.
+    execSync('npm run db:seed -w @continuous-security-demo/api', {
+      stdio: 'pipe',
+      env: process.env,
+    });
+  }
+
+  it('alphaUserA signs in and sees only own invoice', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaUserA);
+    expect(token.split('.')).toHaveLength(3); // JWT header.payload.signature
+    expect(await visibleInvoiceIds(token)).toEqual([SEED_IDS.alphaUserAInvoiceDraft]);
+  });
+
+  it('alphaUserB sees own invoice only (issued)', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaUserB);
+    expect(await visibleInvoiceIds(token)).toEqual([SEED_IDS.alphaUserBInvoiceIssued]);
+  });
+
+  it('alphaManager sees all Alpha invoices', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaManager);
+    expect(await visibleInvoiceIds(token).then((arr) => arr.sort())).toEqual(
+      [SEED_IDS.alphaUserAInvoiceDraft, SEED_IDS.alphaUserBInvoiceIssued].sort(),
+    );
+  });
+
+  it('alphaAdmin sees all Alpha invoices', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaAdmin);
+    expect(await visibleInvoiceIds(token).then((arr) => arr.sort())).toEqual(
+      [SEED_IDS.alphaUserAInvoiceDraft, SEED_IDS.alphaUserBInvoiceIssued].sort(),
+    );
+  });
+
+  it('alphaSuspended sees no invoices', async () => {
+    const token = await signIn(SEED_IDENTITIES.alphaSuspended);
+    expect(await visibleInvoiceIds(token)).toEqual([]);
+  });
+
+  it('betaAdmin sees only Beta invoice', async () => {
+    const token = await signIn(SEED_IDENTITIES.betaAdmin);
+    expect(await visibleInvoiceIds(token)).toEqual([SEED_IDS.betaAdminInvoice]);
+  });
+
+  it('seed is deterministic across resets', async () => {
+    const first = await visibleInvoiceIds(await signIn(SEED_IDENTITIES.alphaManager));
+    runReset();
+    const second = await visibleInvoiceIds(await signIn(SEED_IDENTITIES.alphaManager));
+    expect(second.sort()).toEqual(first.sort());
+  });
+
+  afterAll(async () => {
+    await closePool();
   });
 });

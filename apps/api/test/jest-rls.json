@@ -3,5 +3,6 @@
   "rootDir": "..",
   "testEnvironment": "node",
   "testRegex": ".*\\.rls-spec\\.ts$",
-  "transform": { "^.+\\.(t|j)s$": "@swc/jest" }
+  "transform": { "^.+\\.(t|j)s$": "@swc/jest" },
+  "transformIgnorePatterns": ["node_modules/(?!(jose)/)"]
 }
