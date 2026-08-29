@@ -3,17 +3,20 @@
 // of the service role literal) and removing any service-role reference from
 // database module.
 //
-// Spec §3.4 / §5.2.6 invariant: SUPABASE_SERVICE_ROLE_KEY may be read by
-// exactly one DOMAIN module: apps/api/src/audit/audit.module.ts. The typed
+// Spec §3.4 / §5.2.6 invariant: the Supabase service-role environment key
+// may be read by exactly one DOMAIN module: apps/api/src/audit/audit.module.ts. The typed
 // Env boundary (config/) is exempt — it must reference every env var name
 // for validation. DatabaseModule must not export a service-role client
 // (no provider leaks the key, no regex match for `service-role` /
 // `service_role` / `serviceRole`).
 
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 const SRC_ROOT = path.resolve(__dirname);
+const REPO_ROOT = path.resolve(SRC_ROOT, '../../..');
+const SERVICE_ROLE_KEY = ['SUPABASE', 'SERVICE', 'ROLE', 'KEY'].join('_');
 
 // config/ is the typed env boundary and is exempt from the
 // service-role-literal scan (it must reference every env var name for
@@ -39,10 +42,30 @@ function walk(dir: string, out: string[] = []): string[] {
 // All .ts files under src/, excluding config/, *.spec.ts, node_modules, dist.
 const DOMAIN_TS = walk(SRC_ROOT);
 
-it('service-role literal appears only in audit module (across domain tree)', () => {
-  const literal = 'SUPABASE_SERVICE_ROLE_KEY';
+it('service-role key appears in exactly the five approved boundary files', () => {
+  const files = execFileSync(
+    'git',
+    ['ls-files', '--cached', '--others', '--exclude-standard'],
+    { cwd: REPO_ROOT, encoding: 'utf8' },
+  )
+    .trim()
+    .split('\n')
+    .filter((file) => file.endsWith('.ts'));
+  const offenders = files
+    .filter((file) => fs.readFileSync(path.join(REPO_ROOT, file), 'utf8').includes(SERVICE_ROLE_KEY))
+    .sort();
+  expect(offenders).toEqual([
+    'apps/api/src/audit/audit.module.ts',
+    'apps/api/src/config/config.module.ts',
+    'apps/api/src/config/env.spec.ts',
+    'apps/api/src/config/env.ts',
+    'apps/api/test/setup-env.ts',
+  ]);
+});
+
+it('service-role key appears only in audit module across the domain tree', () => {
   const offenders = DOMAIN_TS.filter((p) =>
-    fs.readFileSync(p, 'utf8').includes(literal),
+    fs.readFileSync(p, 'utf8').includes(SERVICE_ROLE_KEY),
   );
   expect(offenders).toEqual([path.join(SRC_ROOT, 'audit', 'audit.module.ts')]);
 });
@@ -52,7 +75,7 @@ it('DatabaseModule does not reference or export a service-role client', () => {
     path.join(SRC_ROOT, 'database', 'database.module.ts'),
     'utf8',
   );
-  expect(dbModule).not.toMatch(/SUPABASE_SERVICE_ROLE_KEY/);
+  expect(dbModule).not.toContain(SERVICE_ROLE_KEY);
   expect(dbModule).not.toMatch(/service[_-]?role/i);
 });
 
@@ -94,7 +117,7 @@ it('no domain file (other than audit/) references the AUDIT_CLIENT token string'
     path.join(SRC_ROOT, 'audit', 'audit.service.ts'),
   ]);
   const offenders = DOMAIN_TS.filter(
-    (p) => !allowed.has(p) && /['"`]AUDIT_CLIENT['"`]/.test(fs.readFileSync(p, 'utf8')),
+    (p) => !allowed.has(p) && /\bAUDIT_CLIENT\b/.test(fs.readFileSync(p, 'utf8')),
   );
   expect(offenders).toEqual([]);
 });
@@ -114,7 +137,7 @@ it('no non-audit domain file constructs or imports a service-role client', () =>
       .replace(/\/\*[\s\S]*?\*\//g, '') // /* ... */ block comments
       .replace(/^\s*\/\/.*$/gm, '') // whole-line // comments
       .replace(/\s+\/\/.*$/gm, ''); // trailing // comments
-    return /SUPABASE_SERVICE_ROLE_KEY|service[_-]?role/i.test(stripped);
+    return new RegExp(`${SERVICE_ROLE_KEY}|service[_-]?role`, 'i').test(stripped);
   });
   expect(offenders).toEqual([]);
 });

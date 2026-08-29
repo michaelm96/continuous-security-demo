@@ -11,9 +11,9 @@
 // - Anything else → internal (logged once via pino; no stack in production)
 //
 // Audit on 400 (Spec §5.2.6 / §10.4): every 400 must be audited through
-// AuditService unless the originating service already stamped
-// `req.auditRecorded = true` before throwing (services that throw audited
-// rejections directly set the flag so the filter does not double-emit).
+// AuditService unless the originating service marked the thrown exception as
+// already audited. The filter mirrors that marker onto the request so its
+// centralized response path does not double-emit.
 // If the audit write fails, the 400 is replaced with 503 audit_unavailable
 // (fail-closed). All 400 responses — whether from ValidationPipe, an
 // oversize-body rejection, or a service-thrown BadRequestException — flow
@@ -83,21 +83,20 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       reqWithAudit.auditRecorded = true;
     }
 
-    // Body-parser oversize body: error has .status === 413 and
-    // .type === 'entity.too.large'. Express body-parser throws these without
-    // a prototype link to HttpException, so check the duck-typed status.
-    if (
-      exception !== null &&
-      typeof exception === 'object' &&
-      (exception as StatusedError).status === 413
-    ) {
-      await this.respond(
-        req as RequestWithAudit,
-        res,
-        problemDetails('VALIDATION_FAILED', requestId, 'oversize_body'),
-        'oversize_body',
-      );
-      return;
+    // Express body-parser errors are not HttpExceptions. Normalize both its
+    // 413 oversize error and 400 malformed-JSON error to audited 400s.
+    if (exception !== null && typeof exception === 'object') {
+      const status = (exception as StatusedError).status;
+      const detail = status === 413 ? 'oversize_body' : 'malformed_json';
+      if (status === 413 || (status === 400 && !(exception instanceof HttpException))) {
+        await this.respond(
+          reqWithAudit,
+          res,
+          problemDetails('VALIDATION_FAILED', requestId, detail),
+          detail,
+        );
+        return;
+      }
     }
 
     if (exception instanceof HttpException) {
@@ -252,9 +251,8 @@ export class ProblemDetailsFilter implements ExceptionFilter {
   // Centralized write path. Enforces the mandatory-audit invariant for any
   // 400 response (Spec §5.2.6) and emits one redacted log line if the
   // audit write fails (Spec §10.4 — visibility into a degraded mode).
-  // Services that already record their own rejection audit must set
-  // `req.auditRecorded = true` on the request before throwing, which this
-  // method honors to avoid a double-emit.
+  // The catch path mirrors an exception's audit marker onto the request;
+  // this method honors it to avoid a double-emit.
   private async respond(
     req: RequestWithAudit,
     res: Response,
@@ -264,7 +262,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     if (pd.status === 400 && !req.auditRecorded) {
       try {
         await this.auditValidationFailure(req, detailForAudit ?? '');
-      } catch (err) {
+      } catch {
         // Mandatory audit failed — fail closed (Spec §10.4). Log one
         // redacted line so operators see the degraded mode; never log
         // the body, headers, or bearer token.
