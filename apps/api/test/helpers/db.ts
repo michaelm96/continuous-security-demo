@@ -1,32 +1,34 @@
-// Shared `pg.Pool` and `withTransaction` helper for RLS boundary tests.
-// Reads DATABASE_URL (set in .env.example; populated by db:setup).
+// Privileged PostgreSQL helpers for e2e tests.
+// Uses the real local CLI DB URL for privileged operations (catalog assertions,
+// fixture setup/cleanup, trigger/constraint checks).
 
 import { Pool, type PoolClient } from 'pg';
 
-export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: 10,
-});
+let pool: Pool | null = null;
 
-export async function withTransaction<T>(
+function getPool(): Pool {
+  if (!pool) {
+    const dbUrl = process.env.SUPABASE_DB_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
+    pool = new Pool({ connectionString: dbUrl });
+  }
+  return pool;
+}
+
+export async function withPrivilegedTransaction<T>(
   fn: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
-  const client = await pool.connect();
+  const client = await getPool().connect();
   try {
-    await client.query('begin');
-    try {
-      const result = await fn(client);
-      await client.query('rollback');
-      return result;
-    } catch (e) {
-      await client.query('rollback').catch(() => {});
-      throw e;
-    }
+    return await fn(client);
   } finally {
     client.release();
   }
 }
 
-export async function closePool(): Promise<void> {
-  await pool.end();
+export async function closePrivilegedPool(): Promise<void> {
+  await pool?.end();
+  pool = null;
 }
+
+// Alias for backwards compatibility with schema.rls-spec.ts
+export { closePrivilegedPool as closePool };

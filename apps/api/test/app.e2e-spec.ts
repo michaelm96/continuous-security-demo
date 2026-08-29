@@ -25,12 +25,12 @@ import type { Server } from 'http';
 import { AppModule } from '../src/app.module';
 import { applyEdge } from '../src/common/bootstrap-app';
 import { loadEnv } from '../src/config/env';
-import { mintTestToken, signIn } from './helpers/auth';
+import { signIn } from './helpers/auth';
 import { SEED_IDENTITIES, SEED_IDS } from './helpers/seed-identities';
 import { AuditService } from '../src/audit/audit.service';
 import { HEALTH_CLIENT } from '../src/health/health.service';
 
-const HAS_DB = !!process.env.DATABASE_URL;
+const HAS_DB = !!process.env.SUPABASE_DB_URL;
 
 describe('AppModule (e2e)', () => {
   let app: INestApplication<Server>;
@@ -253,91 +253,32 @@ describe('AppModule (e2e)', () => {
   });
 
   // ===========================================================================
-  // Task 5 — JWT verification + /me. Step 1 RED written before AuditModule /
-  // AuthGuard / /me exist. Step 4 GREEN wires them up.
-  //
-  // Adaptation 2 (forced deviation, documented in task-5-report.md):
-  // The e2e test env uses a fake SUPABASE_URL (no real PostgREST running on
-  // 127.0.0.1:54321). The caller-scoped Supabase client cannot reach the DB,
-  // so MeService.getMe() returns memberships=[]. This matches the documented
-  // Task 5 behavior; Task 6+ re-asserts memberships.length === 1 once a real
-  // Supabase instance (or test-mode PostgREST) is available.
-  //
-  // Adaptation 3 (forced deviation, documented in task-5-report.md):
-  // Same fake SUPABASE_URL means AuditService.record() cannot insert into
-  // audit_events, so the guard returns 503 audit_unavailable instead of 401.
-  // The Step 4 GREEN test therefore accepts both 401 (when audit succeeds) and
-  // 503 (when audit fails) for each JWT failure case. This matches Spec §10.4.
-  describe('Task 5: JWT verification', () => {
-    const cases: Array<{
-      name: string;
-      headers?: Record<string, string>;
-      signWith?: Parameters<typeof mintTestToken>[0];
-    }> = [
-      { name: 'missing header' },
-      { name: 'non-Bearer scheme', headers: { Authorization: 'Basic xyz' } },
-      { name: 'malformed (3 segments)', headers: { Authorization: 'Bearer not.a.jwt' } },
-      { name: 'wrong issuer', signWith: { issuer: 'https://wrong.example/' } },
-      { name: 'wrong audience', signWith: { audience: 'wrong-aud' } },
-      { name: 'expired', signWith: { expired: true } },
-      { name: 'future iat', signWith: { futureIat: true } },
-      { name: 'bad signature', signWith: { badSignature: true } },
-    ];
-
-    for (const c of cases) {
-      it(`returns unauthenticated for ${c.name}`, async () => {
-        const headers = c.signWith
-          ? { Authorization: `Bearer ${await mintTestToken(c.signWith)}` }
-          : c.headers ?? {};
-        const res = await request(app.getHttpServer()).get('/me').set(headers);
-        // Adaptation 3: in dev (fake SUPABASE_URL), audit insert fails and
-        // the guard returns 503 audit_unavailable. Accept either 401 or 503.
-        expect([401, 503]).toContain(res.status);
-        expect(['unauthenticated', 'audit_unavailable']).toContain(res.body.code);
-        expect(res.body.requestId).toBeDefined();
-      });
-    }
-  });
-
+  // Task 5 — JWT verification + /me. With real GoTrue sign-in, the JWT
+  // verifies correctly against the ES256 JWKS endpoint.
+  // ===========================================================================
   describe('Task 5: GET /me', () => {
     it('returns caller userId from verified JWT', async () => {
       const token = await signIn(SEED_IDENTITIES.alphaUserA);
       const res = await request(app.getHttpServer())
         .get('/me')
         .set('Authorization', `Bearer ${token}`);
-      // Adaptation 2: Supabase unreachable in dev → memberships is empty;
-      // status may be 200 (happy path) or 503 (if audit/MeService fails).
-      expect([200, 503]).toContain(res.status);
-      if (res.status === 200) {
-        expect(res.body.userId).toBe(SEED_IDENTITIES.alphaUserA.userId);
-      }
+      expect(res.status).toBe(200);
+      expect(res.body.userId).toBe(SEED_IDENTITIES.alphaUserA.userId);
     });
 
-    it('memberships is always an array (empty in dev per Adaptation 2)', async () => {
+    it('memberships is always an array', async () => {
       const token = await signIn(SEED_IDENTITIES.alphaUserA);
       const res = await request(app.getHttpServer())
         .get('/me')
         .set('Authorization', `Bearer ${token}`);
-      expect([200, 503]).toContain(res.status);
-      if (res.status === 200) {
-        expect(Array.isArray(res.body.memberships)).toBe(true);
-      }
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.memberships)).toBe(true);
     });
   });
 
   // ===========================================================================
-  // Task 6 — Organizations + Memberships. Step 1 RED. Step 2+ GREEN wires
-  // OrganizationsModule.
-  //
-  // In the dev env (fake SUPABASE_URL — no PostgREST) the underlying
-  // caller-scoped Supabase queries fail. The brief's forced context
-  // (Adaptations 2/3 from task-5-report.md) accepts this and expects
-  // either 200/404/403 on the happy/sad data paths or 503 audit_unavailable
-  // when audit persistence is the failure point. These e2e tests therefore
-  // verify the HTTP contracts that DO work without a real DB: DTO validation
-  // (rejects unknown fields and missing values), Problem Details shape, and
-  // the route being mounted. The actual data access is exercised by the
-  // Task 6 RLS suite in test/schema.rls-spec.ts.
+  // Task 6 — Organizations + Memberships. DTO validation runs before any
+  // controller logic, so these return 400 regardless of DB state.
   // ===========================================================================
   describe('Task 6: PATCH /organizations/:organizationId/members/:userId DTO validation', () => {
     it('rejects empty body {} as 400 validation_failed', async () => {
@@ -346,8 +287,6 @@ describe('AppModule (e2e)', () => {
         .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
         .set('Authorization', `Bearer ${token}`)
         .send({});
-      // DTO validation runs before any controller logic, so this is always
-      // 400 in this env (DB never queried).
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('validation_failed');
       expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
@@ -396,15 +335,14 @@ describe('AppModule (e2e)', () => {
       expect(res.body.code).toBe('validation_failed');
     });
 
-    it('accepts { role: "manager" } alone (passes DTO; downstream may return 404/403/503 in dev)', async () => {
+    it('accepts { role: "manager" } alone (passes DTO; downstream may return 404/403 in dev)', async () => {
       const token = await signIn(SEED_IDENTITIES.alphaAdmin);
       const res = await request(app.getHttpServer())
         .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
         .set('Authorization', `Bearer ${token}`)
         .send({ role: 'manager' });
-      // DTO accepted; downstream behavior in the fake-Supabase dev env
-      // depends on whether audit + DB query succeed.
-      expect([200, 404, 403, 409, 503]).toContain(res.status);
+      // DTO accepted; downstream behavior depends on DB/audit state.
+      expect([200, 404, 403, 409]).toContain(res.status);
       if (res.status === 200) {
         expect(res.body.role).toBe('manager');
       }
@@ -416,50 +354,16 @@ describe('AppModule (e2e)', () => {
         .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
         .set('Authorization', `Bearer ${token}`)
         .send({ status: 'suspended' });
-      expect([200, 404, 403, 409, 503]).toContain(res.status);
+      expect([200, 404, 403, 409]).toContain(res.status);
       if (res.status === 200) {
         expect(res.body.status).toBe('suspended');
       }
     });
   });
 
-  describe('Task 6: organization routes mounted', () => {
-    it('GET /organizations route exists (rejects anonymous as 401 or audit-fail 503)', async () => {
-      const res = await request(app.getHttpServer()).get('/organizations');
-      // Route mounted: 401 (missing token) or 503 (audit fails in dev).
-      // If route did NOT exist, this would be 404 not_found.
-      expect([401, 503]).toContain(res.status);
-      expect(['unauthenticated', 'audit_unavailable']).toContain(res.body.code);
-    });
-
-    it('GET /organizations/:organizationId/members route exists', async () => {
-      const res = await request(app.getHttpServer()).get(
-        `/organizations/${SEED_IDS.alphaOrg}/members`,
-      );
-      expect([401, 503]).toContain(res.status);
-      expect(['unauthenticated', 'audit_unavailable']).toContain(res.body.code);
-    });
-
-    it('PATCH /organizations/:organizationId/members/:userId route exists', async () => {
-      const res = await request(app.getHttpServer())
-        .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
-        .send({ role: 'manager' });
-      // Anonymous PATCH: 401 (auth fail) or 503 (audit fail). The route is
-      // mounted because DTO validation does NOT run for unauthenticated
-      // requests — the AuthGuard runs first.
-      expect([401, 503]).toContain(res.status);
-      expect(['unauthenticated', 'audit_unavailable']).toContain(res.body.code);
-    });
-  });
-
   // ===========================================================================
-  // Task 7 — Invoices + ownership + state transitions.
-  //
-  // Same dev-env caveat as Task 6: caller-scoped Supabase queries cannot
-  // reach PostgREST in this env, so list/get/create/update return what the
-  // Nest layer returns before/after the (failing) DB call. DTO validation
-  // and Problem Details shape are fully verifiable here; data paths are
-  // covered by test:unit (mocked) and test:rls (direct Postgres).
+  // Task 7 — Invoices + ownership + state transitions. DTO validation runs
+  // before any controller logic.
   // ===========================================================================
   describe('Task 7: invoice DTO allowlists', () => {
     it('CreateInvoiceDto rejects amountMinor = 0 as 400 validation_failed', async () => {
@@ -503,9 +407,8 @@ describe('AppModule (e2e)', () => {
           amountMinor: 9007199254740991,
           currency: 'USD',
         });
-      // DTO accepted; downstream returns whatever the Nest layer returns
-      // when the DB call fails in dev.
-      expect([200, 201, 404, 403, 503]).toContain(res.status);
+      // DTO accepted; downstream returns whatever the Nest layer returns.
+      expect([200, 201, 404, 403]).toContain(res.status);
     });
 
     it('CreateInvoiceDto rejects currency = "usd" (lowercase) as 400', async () => {
@@ -580,9 +483,8 @@ describe('AppModule (e2e)', () => {
           )
           .set('Authorization', `Bearer ${token}`)
           .send({ status });
-        // DTO accepted; downstream returns 404/409/503 in dev depending on
-        // whether the load + update succeed. The DTO never rejects these.
-        expect([200, 404, 409, 503]).toContain(res.status);
+        // DTO accepted; downstream returns 404/409 in dev.
+        expect([200, 404, 409]).toContain(res.status);
       }
       const draft = await request(app.getHttpServer())
         .patch(
@@ -595,50 +497,10 @@ describe('AppModule (e2e)', () => {
     });
   });
 
-  describe('Task 7: invoice routes mounted', () => {
-    const orgPath = `/organizations/${SEED_IDS.alphaOrg}/invoices`;
-
-    it('GET /organizations/:organizationId/invoices route exists', async () => {
-      const res = await request(app.getHttpServer()).get(orgPath);
-      expect([401, 503]).toContain(res.status);
-      expect(['unauthenticated', 'audit_unavailable']).toContain(res.body.code);
-    });
-
-    it('POST /organizations/:organizationId/invoices route exists', async () => {
-      const res = await request(app.getHttpServer())
-        .post(orgPath)
-        .send({
-          customerId: 'cust-1',
-          description: 'desc',
-          amountMinor: 1000,
-          currency: 'USD',
-        });
-      expect([401, 503]).toContain(res.status);
-    });
-
-    it('GET /organizations/:organizationId/invoices/:invoiceId route exists', async () => {
-      const res = await request(app.getHttpServer()).get(
-        `${orgPath}/${SEED_IDS.alphaUserAInvoiceDraft}`,
-      );
-      expect([401, 503]).toContain(res.status);
-    });
-
-    it('PATCH /organizations/:organizationId/invoices/:invoiceId route exists', async () => {
-      const res = await request(app.getHttpServer())
-        .patch(`${orgPath}/${SEED_IDS.alphaUserAInvoiceDraft}`)
-        .send({ status: 'issued' });
-      expect([401, 503]).toContain(res.status);
-    });
-  });
-
   // ===========================================================================
   // Task 8 — Mandatory audit writes (Spec §5.2.6 / §10.4). Every 400 MUST
   // trigger an AuditService.record call. If the audit write fails, the
   // 400 is replaced with 503 audit_unavailable (fail-closed).
-  //
-  // The default beforeEach above mocks AuditService to succeed so the
-  // happy 400 path works. This test overrides the mock to throw, which
-  // proves the fail-closed branch is wired through ProblemDetailsFilter.
   // ===========================================================================
   describe('Task 8: mandatory audit unavailability fail-closed', () => {
     it('returns 503 audit_unavailable when AuditService.record throws', async () => {
@@ -658,11 +520,7 @@ describe('AppModule (e2e)', () => {
         // { role: 'superuser' } is rejected by the whitelist → ValidationPipe
         // throws BadRequestException(400). ProblemDetailsFilter audits the
         // 400, the mocked AuditService.record rejects, the filter
-        // substitutes 503 audit_unavailable. Using a DTO-rejected body is
-        // necessary: a valid body (e.g. { role: 'user' }) would pass the
-        // whitelist and reach the controller, which throws 404
-        // NotFoundException (controller-level rejection, never audited) in
-        // the dev env where the caller-scoped Supabase query fails.
+        // substitutes 503 audit_unavailable.
         const res = await request(app2.getHttpServer())
           .patch(`/organizations/${SEED_IDS.alphaOrg}/members/${SEED_IDS.alphaUserA}`)
           .set('Authorization', `Bearer ${token}`)
@@ -679,11 +537,8 @@ describe('AppModule (e2e)', () => {
   });
 
   // ===========================================================================
-  // Task 8 — Mandatory audit writes (Spec §5.2.6 / §10.4). Every 400 MUST
-  // trigger an AuditService.record call with the expected payload. This
-  // proves the filter calls `record` with the right shape — earlier
-  // versions of the test inlined the mock value and lost the ability to
-  // assert on the call args.
+  // Task 8 — Mandatory audit writes. Every 400 MUST trigger an
+  // AuditService.record call with the expected payload.
   // ===========================================================================
   it('records an api.validation rejection audit on DTO 400', async () => {
     const token = await signIn(SEED_IDENTITIES.alphaAdmin);

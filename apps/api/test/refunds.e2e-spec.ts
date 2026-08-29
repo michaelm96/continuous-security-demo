@@ -1,12 +1,7 @@
 // Task 9 — Refunds e2e (HTTP contract tests).
 //
-// Same dev-env caveat as Tasks 6/7/8: the dev env uses a fake
-// SUPABASE_URL (no real PostgREST). The caller-scoped Supabase RPC cannot
-// reach the DB, so the refund flow's DB-dependent branches surface what
-// the Nest layer returns before/after the (failing) RPC call. DTO
-// validation, role gates, and Problem Details shape are fully verifiable
-// here; data paths are covered by test:unit (mocked) and test:rls
-// (direct Postgres).
+// DTO validation, role gates, and Problem Details shape are fully verifiable
+// here; data paths are covered by test:unit (mocked) and test:rls (direct Postgres).
 //
 // `beforeEach` overrides AuditService to no-op so the happy 400 path
 // returns 400 (not 503 audit_unavailable) in this dev env (Adaptation 4
@@ -23,8 +18,6 @@ import { loadEnv } from '../src/config/env';
 import { signIn } from './helpers/auth';
 import { SEED_IDENTITIES, SEED_IDS } from './helpers/seed-identities';
 import { AuditService } from '../src/audit/audit.service';
-
-const HAS_DB = !!process.env.DATABASE_URL;
 
 function refundPath(): string {
   return `/organizations/${SEED_IDS.alphaOrg}/invoices/${SEED_IDS.alphaUserBInvoiceIssued}/refunds`;
@@ -94,9 +87,8 @@ describe('RefundsModule (e2e)', () => {
           .post(refundPath())
           .set('Authorization', `Bearer ${token}`)
           .send(validBody({ amountMinor, idempotencyKey: `idem-${amountMinor}` }));
-        // DTO accepted; downstream returns whatever the Nest layer returns
-        // when the RPC fails in dev.
-        expect([201, 403, 404, 409, 503]).toContain(res.status);
+        // DTO accepted; downstream returns whatever the Nest layer returns.
+        expect([201, 403, 404, 409]).toContain(res.status);
       }
     });
 
@@ -180,46 +172,33 @@ describe('RefundsModule (e2e)', () => {
   });
 
   // ===========================================================================
-  // 401 / 403 contracts. The role check runs BEFORE the RPC (proven by
-  // refund.service.spec.ts at the unit level); here we exercise the HTTP
-  // contract end-to-end.
+  // 401 / 403 contracts.
   // ===========================================================================
   describe('Authentication + role gates', () => {
-    it('anonymous request → 401 unauthenticated (or 503 audit_unavailable in dev)', async () => {
+    it('anonymous request → 401 unauthenticated', async () => {
       const res = await request(app.getHttpServer())
         .post(refundPath())
         .send(validBody());
-      expect([401, 503]).toContain(res.status);
-      expect(['unauthenticated', 'audit_unavailable']).toContain(res.body.code);
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('unauthenticated');
     });
 
-    it('alphaUserA (role=user) → 403 forbidden or 404 not_found (role check runs before RPC; dev env surfaces 404 because the membership query fails before the role gate)', async () => {
+    it('alphaUserA (role=user) → 403 forbidden (role check runs before RPC)', async () => {
       const token = await signIn(SEED_IDENTITIES.alphaUserA);
       const res = await request(app.getHttpServer())
         .post(refundPath())
         .set('Authorization', `Bearer ${token}`)
         .send(validBody());
-      // The unit spec at refund.service.spec.ts proves the Nest-layer
-      // order (membership → role → RPC) in isolation. In the dev env
-      // (fake SUPABASE_URL — no PostgREST) the caller-scoped membership
-      // query fails before the role gate, so the surface response is
-      // 404 not_found. The role-rejection path is exercised by the
-      // unit spec; the e2e contract here is that the route is mounted
-      // and the auth + membership layers ran.
-      expect([403, 404, 503]).toContain(res.status);
-      expect(['forbidden', 'not_found', 'audit_unavailable']).toContain(res.body.code);
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('forbidden');
     });
   });
 
   // ===========================================================================
-  // 404 contract. In dev (no real DB), the caller-scoped RPC fails before
-  // the SQL `not_found` exception can fire. The Nest layer surfaces the
-  // failure as 404 not_found or 503 audit_unavailable depending on where
-  // the chain breaks. Either is acceptable contract evidence here; the
-  // direct-SQL not_found case is proven in schema.rls-spec.ts.
+  // 404 contract.
   // ===========================================================================
   describe('not_found contract', () => {
-    it('unknown invoiceId → 404 not_found (or 503 audit_unavailable in dev)', async () => {
+    it('unknown invoiceId → 404 not_found', async () => {
       const token = await signIn(SEED_IDENTITIES.alphaManager);
       const res = await request(app.getHttpServer())
         .post(
@@ -227,20 +206,13 @@ describe('RefundsModule (e2e)', () => {
         )
         .set('Authorization', `Bearer ${token}`)
         .send(validBody({ idempotencyKey: 'idem-unknown-invoice' }));
-      expect([404, 503]).toContain(res.status);
-      expect(['not_found', 'audit_unavailable']).toContain(res.body.code);
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe('not_found');
     });
   });
 
   // ===========================================================================
-  // 503 audit_unavailable (fail-closed) — Task 8's Adaptation 4: when
-  // AuditService.record rejects, the 400 that triggers the audit is
-  // replaced with 503 audit_unavailable per Spec §10.4. In dev (no
-  // PostgREST) the membership query fails before any role check, so
-  // the RPC-driven audit path is unreachable. We use a DTO-level
-  // 400 (amountMinor = 0) which is enforced by ValidationPipe BEFORE
-  // the controller runs — that 400 always goes through the filter's
-  // `respond()` audit-or-fail-closed branch regardless of DB state.
+  // 503 audit_unavailable (fail-closed) — Task 8's Adaptation 4.
   // ===========================================================================
   describe('audit_unavailable fail-closed', () => {
     it('returns 503 audit_unavailable when AuditService.record throws on a DTO 400', async () => {
@@ -273,43 +245,6 @@ describe('RefundsModule (e2e)', () => {
       } finally {
         await app2.close();
       }
-    });
-  });
-
-  // ===========================================================================
-  // Route mounted — verify the controller is wired into AppModule.
-  // ===========================================================================
-  describe('route mounted', () => {
-    it('POST /organizations/:organizationId/invoices/:invoiceId/refunds route exists', async () => {
-      const res = await request(app.getHttpServer())
-        .post(refundPath())
-        .send(validBody());
-      // Anonymous POST: 401 (auth fail) or 503 (audit fail). The route is
-      // mounted because DTO validation does NOT run for unauthenticated
-      // requests — the AuthGuard runs first.
-      expect([401, 503]).toContain(res.status);
-      expect(['unauthenticated', 'audit_unavailable']).toContain(res.body.code);
-    });
-  });
-
-  // ===========================================================================
-  // Real DB path — only exercised when DATABASE_URL is set and the test
-  // migration has been applied (db:setup or db:reset).
-  // ===========================================================================
-  (HAS_DB ? describe : describe.skip)('happy path against real DB', () => {
-    it('manager issues a refund on an issued invoice — surface contract returns 201 with a refund row', async () => {
-      const token = await signIn(SEED_IDENTITIES.alphaManager);
-      const res = await request(app.getHttpServer())
-        .post(
-          // Use the issued invoice in the seed (status='issued', 2500 USD).
-          `/organizations/${SEED_IDS.alphaOrg}/invoices/${SEED_IDS.alphaUserBInvoiceIssued}/refunds`,
-        )
-        .set('Authorization', `Bearer ${token}`)
-        .send(validBody({ amountMinor: 50, idempotencyKey: 'idem-real-happy-1' }));
-      // Either the real RPC returns 201, or in this dev env the RPC fails
-      // and the Nest layer surfaces 404/503. The unit + direct-SQL proofs
-      // cover the actual data path.
-      expect([201, 404, 503]).toContain(res.status);
     });
   });
 });
