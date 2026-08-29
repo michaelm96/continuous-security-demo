@@ -51,6 +51,46 @@ export interface DecodedAccessToken {
   aud: string;
 }
 
+export interface MintTokenOptions {
+  issuer?: string;
+  audience?: string;
+  expired?: boolean;
+  futureIat?: boolean;
+  badSignature?: boolean;
+  sub?: string;
+}
+
+// Mint a JWT with deliberate failures. Used by the Step 1 RED JWT failure
+// cases (wrong issuer, wrong audience, expired, future iat, bad signature).
+// Defaults produce a valid token signed with SUPABASE_JWT_SECRET.
+export async function mintTestToken(opts: MintTokenOptions = {}): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const exp = opts.expired ? now - 60 : now + 3600;
+  const iat = opts.futureIat ? now + 600 : now;
+  const audience = opts.audience ?? 'authenticated';
+  const issuer = opts.issuer ?? process.env.SUPABASE_JWT_ISSUER ?? 'http://127.0.0.1:54321';
+  const sub = opts.sub ?? '00000000-0000-4000-8000-000000000000';
+  const secretBytes2 = opts.badSignature
+    ? new TextEncoder().encode('different-secret-also-32-chars-long-for-tests-please')
+    : secretBytes();
+  return new SignJWT({
+    role: 'authenticated',
+    aud: audience,
+    email: 'test@example.test',
+    app_metadata: { provider: 'email', providers: ['email'] },
+    user_metadata: {},
+    iat,
+    exp,
+  })
+    .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+    .setSubject(sub)
+    .setIssuedAt(iat)
+    .setExpirationTime(exp)
+    .setAudience(audience)
+    .setIssuer(issuer)
+    .sign(secretBytes2);
+}
+
 export async function decodeAccessToken(token: string): Promise<DecodedAccessToken> {
   // Boundary tests trust the locally-minted secret; no verify needed because
   // the test process is the only signer on this host.

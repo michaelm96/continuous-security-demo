@@ -97,6 +97,25 @@ export class ProblemDetailsFilter implements ExceptionFilter {
         res.status(pd.status).json(pd);
         return;
       }
+      if (status === 503) {
+        // 503 can mean audit_unavailable (Task 5 AuthGuard) or
+        // dependency_unavailable (Task 4 HealthService). Trust the explicit
+        // code from the exception body when present.
+        const code =
+          typeof body === 'object' &&
+          body !== null &&
+          'code' in body &&
+          typeof (body as { code: unknown }).code === 'string'
+            ? ((body as { code: string }).code)
+            : 'dependency_unavailable';
+        const pd = problemDetails(
+          code === 'audit_unavailable' ? 'AUDIT_UNAVAILABLE' : 'DEPENDENCY_UNAVAILABLE',
+          requestId,
+          detail,
+        );
+        res.status(pd.status).json(pd);
+        return;
+      }
       const pd = problemDetailsFromStatus(status, requestId, detail);
       res.status(pd.status).json(pd);
       return;

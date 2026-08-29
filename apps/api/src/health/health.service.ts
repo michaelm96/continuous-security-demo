@@ -12,7 +12,8 @@
 import { Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import type { Pool } from 'pg';
 
-import { PG_POOL } from '../database/database.module';
+import { PG_POOL } from './pg-pool.token';
+import { ENV } from '../config/config.module';
 import type { Env } from '../config/env';
 
 export interface Probe {
@@ -25,7 +26,7 @@ export interface Probe {
 export class HealthService {
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
-    @Inject('ENV') private readonly env: Env,
+    @Inject(ENV) private readonly env: Env,
   ) {}
 
   private get probes(): Probe[] {

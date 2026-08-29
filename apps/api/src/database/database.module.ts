@@ -1,47 +1,24 @@
-// DatabaseModule stub for Task 4. Task 5 will replace this with the real
-// callerClient(accessToken) provider and remove the direct PG_POOL export.
-//
-// Postgres.app adaptation: same pg.Pool serves both the `database` and
-// `auth` probes (no separate Auth service on this dev host). The probe
-// shape (Probe = { name, run(): Promise<void> }) is preserved so the
-// HealthService doesn't change when real Supabase Auth lands.
+// DatabaseModule — exports only the caller-scoped client factory
+// (CALLER_CLIENT). No PG_POOL, no elevated-privilege client. The HealthService
+// pg.Pool probe from Task 4 was relocated to HealthModule (its sole
+// consumer) so this module is exclusively the caller boundary.
 
-import {
-  Inject,
-  Module,
-  OnApplicationShutdown,
-  Provider,
-} from '@nestjs/common';
-import { Pool } from 'pg';
+import { Module } from '@nestjs/common';
 
 import { ConfigModule } from '../config/config.module';
+import { ENV } from '../config/config.module';
 import type { Env } from '../config/env';
-
-export const PG_POOL = 'PG_POOL';
-
-const pgPoolProvider: Provider = {
-  provide: PG_POOL,
-  useFactory: (env: Env) =>
-    new Pool({
-      connectionString: env.DATABASE_URL,
-      // brief: probes use 2-second timeout
-      connectionTimeoutMillis: 2000,
-      idleTimeoutMillis: 10_000,
-      max: 10,
-    }),
-  inject: ['ENV'],
-};
-
-class PoolHolder implements OnApplicationShutdown {
-  constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
-  async onApplicationShutdown(): Promise<void> {
-    await this.pool.end().catch(() => {});
-  }
-}
+import { CALLER_CLIENT, createCallerClient } from './caller-client';
 
 @Module({
   imports: [ConfigModule],
-  providers: [pgPoolProvider, PoolHolder],
-  exports: [PG_POOL],
+  providers: [
+    {
+      provide: CALLER_CLIENT,
+      inject: [ENV],
+      useFactory: (env: Env) => createCallerClient(env),
+    },
+  ],
+  exports: [CALLER_CLIENT],
 })
 export class DatabaseModule {}
