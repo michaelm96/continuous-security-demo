@@ -3,7 +3,6 @@
 // middlewares on every route via configure().
 
 import {
-  Inject,
   MiddlewareConsumer,
   Module,
   NestModule,

@@ -11,7 +11,7 @@ import {
   BadRequestException,
   HttpException,
 } from '@nestjs/common';
-import type { Request, Response } from 'express';
+import type { Request } from 'express';
 
 import { ProblemDetailsFilter } from './problem-details.filter';
 import { AuditService, AUDIT_UNAVAILABLE } from '../audit/audit.service';

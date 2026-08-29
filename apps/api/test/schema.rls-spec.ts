@@ -1519,7 +1519,7 @@ describe('Task 9: create_refund RPC — privilege + rejection matrix', () => {
   }
 
   it('same-org `user` role calling create_refund raises `forbidden` (42501)', async () => {
-    const { orgId, userId, invoiceIssuedId } = await makeOrgWithMembers();
+    const { userId, invoiceIssuedId } = await makeOrgWithMembers();
     await expect(
       asAuthenticated(client, userId, async () => {
         await client.query(
