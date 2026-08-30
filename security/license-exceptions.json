@@ -5,6 +5,30 @@
       "version": "1.0.30001810",
       "license": "CC-BY-4.0",
       "rationale": "Browser-compatibility database (data, not software). CC-BY-4.0 requires only attribution; commercial/redistribution use is permitted and the README preserves the attribution."
+    },
+    {
+      "package": "@img/sharp-libvips-darwin-arm64",
+      "version": "1.3.3",
+      "license": "LGPL-3.0-or-later",
+      "rationale": "Dynamically-linked native libvips binary used by Next.js's sharp image pipeline; LGPL-3.0 is compatible with proprietary use under dynamic linking per LGPL section 3."
+    },
+    {
+      "package": "@img/sharp-libvips-darwin-x64",
+      "version": "1.3.3",
+      "license": "LGPL-3.0-or-later",
+      "rationale": "Dynamically-linked native libvips binary used by Next.js's sharp image pipeline; LGPL-3.0 is compatible with proprietary use under dynamic linking per LGPL section 3."
+    },
+    {
+      "package": "@img/sharp-libvips-linux-x64",
+      "version": "1.3.3",
+      "license": "LGPL-3.0-or-later",
+      "rationale": "Dynamically-linked native libvips binary used by Next.js's sharp image pipeline; LGPL-3.0 is compatible with proprietary use under dynamic linking per LGPL section 3."
+    },
+    {
+      "package": "@img/sharp-libvips-linux-arm64",
+      "version": "1.3.3",
+      "license": "LGPL-3.0-or-later",
+      "rationale": "Dynamically-linked native libvips binary used by Next.js's sharp image pipeline; LGPL-3.0 is compatible with proprietary use under dynamic linking per LGPL section 3."
     }
   ]
 }
