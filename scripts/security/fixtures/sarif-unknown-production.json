@@ -1,0 +1,35 @@
+{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "osv-scanner",
+          "version": "1.0.0"
+        }
+      },
+      "results": [
+        {
+          "ruleId": "OSV-UNKNOWN-001",
+          "level": "warning",
+          "message": {
+            "text": "Unknown vulnerability in package unknown-pkg@1.0.0"
+          },
+          "properties": {},
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "package-lock.json"
+                },
+                "region": {
+                  "startLine": 50
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

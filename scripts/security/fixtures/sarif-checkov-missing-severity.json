@@ -1,0 +1,40 @@
+{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Checkov",
+          "version": "3.0.0"
+        }
+      },
+      "results": [
+        {
+          "ruleId": "CKV_GHA_2",
+          "level": "error",
+          "message": {
+            "text": "Pinned SHA missing in third party action"
+          },
+          "check": {
+            "result": {
+              "check_type": "github_actions"
+            }
+          },
+          "properties": {},
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/ci.yml"
+                },
+                "region": {
+                  "startLine": 15
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

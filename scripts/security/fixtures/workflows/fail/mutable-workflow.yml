@@ -1,0 +1,13 @@
+name: Mutable Actions Workflow
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with tag
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@main
+      - name: Custom action
+        uses: ./my-local-action

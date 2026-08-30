@@ -1,0 +1,38 @@
+{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "osv-scanner",
+          "version": "1.0.0"
+        }
+      },
+      "results": [
+        {
+          "ruleId": "OSV-VULN-2024-5678",
+          "level": "warning",
+          "message": {
+            "text": "Moderate denial of service vulnerability in package bar@2.0.0"
+          },
+          "properties": {
+            "security/Severity": "5.3",
+            "security-severity": "5.3"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "package-lock.json"
+                },
+                "region": {
+                  "startLine": 100
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

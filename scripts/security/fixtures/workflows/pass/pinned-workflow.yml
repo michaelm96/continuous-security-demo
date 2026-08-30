@@ -1,0 +1,11 @@
+name: Pinned Actions Workflow
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@a81bbbf82908c307b281c3d5e3dca85f1e8b0f1b
+      - name: Setup Node
+        uses: actions/setup-node@8d9e9e0c3a1e8c9d0e7f6c9d0e7f6c9d0e7f6c9d

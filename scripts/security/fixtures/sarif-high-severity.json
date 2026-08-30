@@ -1,0 +1,38 @@
+{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "osv-scanner",
+          "version": "1.0.0"
+        }
+      },
+      "results": [
+        {
+          "ruleId": "OSV-VULN-2024-1234",
+          "level": "error",
+          "message": {
+            "text": "Remote code execution vulnerability in package foo@1.2.3"
+          },
+          "properties": {
+            "security/Severity": "9.8",
+            "security-severity": "9.8"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "package-lock.json"
+                },
+                "region": {
+                  "startLine": 42
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
