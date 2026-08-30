@@ -26,3 +26,21 @@ paths = [
 regexes = [
   '''(LocalOnly-Admin1!|LocalOnly-Manager1!|LocalOnly-UserA1!|LocalOnly-UserB1!|LocalOnly-Suspended1!|LocalOnly-Admin2!)''',
 ]
+
+[[allowlists]]
+description = "Documentation prose in the Project 2 plan file that triggers the generic-api-key rule; never a real secret."
+paths = [
+  '''docs/superpowers/plans/2026-08-29-project-2-deterministic-pr-security\.md''',
+]
+regexes = [
+  '''secret,\s+prohibited/missing''',
+]
+
+[[allowlists]]
+description = "NestJS scaffold placeholder CircleCI badge token in apps/api/README.md; known third-party placeholder, never a real secret."
+paths = [
+  '''apps/api/README\.md''',
+]
+regexes = [
+  '''token=abc123def456''',
+]

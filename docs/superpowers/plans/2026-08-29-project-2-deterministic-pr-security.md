@@ -584,7 +584,7 @@ git status --short
 Expected:
 
 - Project 1 verification remains green;
-- production scans have no blocking high/critical finding, secret, prohibited/missing production license, or high/critical IaC result;
+- production scans must report no blocking high/critical finding, no secret leak, no prohibited or missing production license, and no high/critical IaC result;
 - fixture self-test detects all four required identifiers;
 - every external workflow action passes the immutable-ref checker;
 - reports contain no plaintext credentials.
