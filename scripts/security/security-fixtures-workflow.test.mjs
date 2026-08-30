@@ -138,3 +138,21 @@ test('security-fixtures.yml Checkov step pins --framework github_actions and res
     "the Checkov step must pass --skip-path '^$' (overrides the repo-root .checkov.yml skip list)",
   );
 });
+
+const gitleaksStepBody = stepBody('Scan the fixture secret');
+
+// Inherited `bash -e` would abort before `status=$?` runs; the if/else makes
+// gitleaks' exit the conditional test, so errexit does not trigger and the
+// 0/1 status gate and SARIF nonempty guard (same step, in order) run.
+test('security-fixtures.yml Gitleaks step wraps detect in if/else, then gates on 0/1 status and nonempty SARIF', () => {
+  assert.match(
+    gitleaksStepBody,
+    /if gitleaks detect --no-git --redact=100 --config security\/gitleaks-fixture\.toml \\\n\s+--source security\/fixtures\/secrets \\\n\s+--report-format sarif --report-path security-reports\/fixture-gitleaks\.sarif; then\n\s+status=0\n\s+else\n\s+status=\$\?\n\s+fi\n\s+if \[ "\$\{status\}" -ne 0 \] && \[ "\$\{status\}" -ne 1 \]; then/,
+    'gitleaks detect must be inside `if ...; then status=0; else status=$?; fi`, followed by the 0/1 status gate',
+  );
+  assert.match(
+    gitleaksStepBody,
+    /if \[ ! -s security-reports\/fixture-gitleaks\.sarif \]; then/,
+    'the SARIF nonempty guard must live in the same step, after the 0/1 status gate',
+  );
+});

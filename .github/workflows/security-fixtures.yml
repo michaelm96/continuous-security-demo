@@ -86,10 +86,16 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p security-reports
-          gitleaks detect --no-git --redact=100 --config security/gitleaks-fixture.toml \
+          # Inherited `bash -e` would abort before `status=$?` runs on a hit;
+          # the if/else makes gitleaks' exit the conditional test, so errexit
+          # does not trigger and the downstream 0/1 status and SARIF guards run.
+          if gitleaks detect --no-git --redact=100 --config security/gitleaks-fixture.toml \
             --source security/fixtures/secrets \
-            --report-format sarif --report-path security-reports/fixture-gitleaks.sarif
-          status=$?
+            --report-format sarif --report-path security-reports/fixture-gitleaks.sarif; then
+            status=0
+          else
+            status=$?
+          fi
           if [ "${status}" -ne 0 ] && [ "${status}" -ne 1 ]; then
             echo "::error::gitleaks failed with exit ${status}"
             exit "${status}"
