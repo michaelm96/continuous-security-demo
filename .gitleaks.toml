@@ -44,3 +44,12 @@ paths = [
 regexes = [
   '''token=abc123def456''',
 ]
+
+[[allowlists]]
+description = "Test file in scripts/security/ that constructs the NestJS scaffold placeholder regex literal at runtime; the historical commit contained the literal which the new commit eliminates, but the allowlist covers the historical entry."
+paths = [
+  '''scripts/security/gitleaks-config\.test\.mjs''',
+]
+regexes = [
+  '''token=abc123def456''',
+]
