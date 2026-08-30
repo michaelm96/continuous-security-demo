@@ -362,7 +362,7 @@ Use independent jobs so one failure does not erase other evidence:
 3. `osv-policy`: `if: always()`, download the exact OSV artifact, run the tested `>=7.0` policy with production/development classification.
 4. `gitleaks`: checkout with `fetch-depth: 0`, checksum-install Gitleaks, scan `--all --redact=100`, upload sanitized SARIF.
 5. `checkov`: install from `security/requirements-project2.txt`, scan `.github`, `supabase`, Docker/config surfaces with SARIF, then apply the tested local severity evaluator; missing severity blocks.
-6. `licenses-sbom`: `npm ci --ignore-scripts`, capture `npm query ':prod' --json` and `':dev'`, run license policy, generate CycloneDX JSON.
+6. `licenses-sbom`: `npm ci --ignore-scripts`, capture `npm query '.prod' --json > security-reports/npm-production.json` and `npm query '.dev' --json > security-reports/npm-development.json`, run license policy against those files, generate CycloneDX JSON.
 7. `policy-tests`: `npm ci --ignore-scripts`, run `npm run security:test` and action-pin checker.
 
 Fork PRs must not require repository secrets. PR jobs must not have `issues: write`; do not use `pull_request_target`.
@@ -384,7 +384,13 @@ on:
 
 Permissions stay `contents: read` at workflow level. Give only SARIF upload jobs `security-events: write`, and gate those jobs with `github.ref == 'refs/heads/master'` plus default-branch workflow provenance so a non-master manual dispatch stays read-only.
 
-Run the same production scanners plus the full locked-graph production/development license policy against the complete current tree/history. Upload each production SARIF to Code Scanning under stable categories such as `osv-production`, `gitleaks-production`, and `checkov-production`. A final `manifest` job runs only after all required jobs succeed in the same run, downloads their reports, verifies run ID/ref/head SHA/tool/category/digest provenance, and writes/uploads `production-security-evidence` containing:
+Run the same production scanners plus the full locked-graph production/development license policy against the complete current tree/history. Upload each production SARIF to Code Scanning under stable categories such as `osv-production`, `gitleaks-production`, and `checkov-production`.
+
+Scanner execution is decoupled from policy verdict:
+
+- Each scanner job (OSV, Gitleaks, Checkov, license) generates its raw report and uploads it. Scanners MUST NOT fail because of policy decisions; they MUST fail when the binary crashes, a report is missing, the report is malformed, or upstream invocation fails. A scanner that crashes exits nonzero and the manifest job marks that slot as `incomplete` (not `complete: true`).
+- A separate `policy-eval` job (`if: always()` on each upstream) downloads the artifact set and applies the tested severity evaluator and license policy. Its exit code communicates the verdict (1 = blocking findings exist, 0 = clean) but does not gate the manifest job.
+- The `manifest` job runs after all scanner jobs complete (`if: always()` on every scanner, `needs: [osv, gitleaks, checkov, licenses-sbom]` without requiring `success()`). It downloads all reports, verifies run ID, ref, head SHA, tool, category, and SHA-256 digest, and writes/uploads `production-security-evidence` containing:
 
 ```text
 security-reports/osv.sarif
@@ -395,7 +401,14 @@ security-reports/sbom.cdx.json
 security-reports/production-manifest.json
 ```
 
-The manifest job has no issue-write permission. Project 3 will consume it later.
+`production-manifest.json` records:
+
+- `headSha`, `ref`, `runId`, `toolVersions`, `generationTime`;
+- one record per scanner with `status: success | failure`, `reportPath`, `digest`, `category`, `expected: true | false`;
+- `policy: { verdict: 'clean' | 'blocking', blockedCount, reportedCount }` — present even when blocking;
+- `complete: true` only when every required production scanner has `status: success` and every digest matches. A scanner crash or missing report sets `complete: false` and `incompleteReason[]`.
+
+Project 3 reads the manifest and refuses to mutate Issues when `complete` is `false`. The manifest job has no issue-write permission. The `policy-eval` job fails the workflow when `verdict === 'blocking'`, ensuring CI still blocks, but the manifest is preserved for Project 3 regardless.
 
 ### Step 5: Add Dependabot and Checkov scope
 

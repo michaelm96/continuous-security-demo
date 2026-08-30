@@ -179,9 +179,9 @@ It fetches with a timeout, validates `openapi` and `paths`, normalizes operation
 
 The standalone script generates the artifact. Exact matrix reconciliation occurs in the typed Jest suite, avoiding a TypeScript runtime dependency in the Node script.
 
-### Step 3: Define the checked-in matrix
+### Step 3: Define the typed matrix skeleton
 
-Use exactly:
+The matrix file declares the type contract and an empty `AUTHORIZATION_MATRIX` array. Tests reference this file and fail until each live operation has a populated entry:
 
 ```ts
 export type Actor =
@@ -211,11 +211,15 @@ export interface EndpointAuthorizationPolicy {
 export const AUTHORIZATION_MATRIX: readonly EndpointAuthorizationPolicy[] = [];
 ```
 
+Tests assert the empty-matrix contract: missing entries fail, duplicate entries fail, extra live operations fail. This is the RED step before any policy is recorded.
+
+### Step 4: Populate the matrix
+
 Add one policy per fixed operation. Cases must include where applicable:
 
 - anonymous `401`;
 - active same-tenant success;
-- suspended same-tenant `403`;
+- suspended same-tenant `403` (with explicit exception for `/me` returning `200` empty and `/organizations` returning `200 []` per the Project 1 contract);
 - cross-tenant `404`;
 - ordinary-user owner success for invoice reads;
 - ordinary-user non-owner `404` for invoice reads;
@@ -223,9 +227,9 @@ Add one policy per fixed operation. Cases must include where applicable:
 - manager/admin success for privileged operations;
 - public health `200`.
 
-Do not infer a new policy from current accidental behavior. The approved Project 1 contract remains authoritative.
+Do not infer a new policy from current accidental behavior. The approved Project 1 contract remains authoritative. After population, the existing tests from Step 3 must continue to pass (no missing entries, no duplicates).
 
-### Step 4: Write the failing real-stack matrix driver
+### Step 5: Write the failing real-stack matrix driver
 
 Use:
 
@@ -259,7 +263,7 @@ npm -w apps/api run test:e2e -- --runTestsByPath test/security/authorization-mat
 
 Expected initial failure: missing matrix/driver. If the new `/me` self-only assertion fails on existing code, do not relax it. File a separate focused Project 1 remediation for `MeService.getMe(principal: Principal): Promise<MeResponse>` to scope its membership query by `principal.userId`, then re-run all Project 1 checks before resuming.
 
-### Step 5: Add scripts and verify
+### Step 6: Add scripts and verify
 
 Add:
 
@@ -282,7 +286,7 @@ npm -w apps/api run lint
 git diff --check
 ```
 
-### Step 6: Commit
+### Step 7: Commit
 
 ```bash
 git add scripts/security/openapi-inventory.* apps/api/test/security apps/api/test/helpers/seed-identities.ts apps/api/package.json package.json
@@ -351,7 +355,7 @@ mkdir -p security
 printf '# Schemathesis configuration — all options passed via CLI flags\n' > security/schemathesis.toml
 ```
 
-### Step 5: Implement tracecov hook and runner
+### Step 4: Implement tracecov hook and runner
 
 `security/schemathesis-hooks.py` contains only:
 
@@ -387,7 +391,7 @@ schemathesis run "$SCHEMA_URL" \
 
 Print the seed and a redacted command before execution. Never use `eval`.
 
-### Step 4: Create the application-verification workflow
+### Step 5: Create the application-verification workflow
 
 Triggers:
 
@@ -458,7 +462,7 @@ test -s security-reports/schema-coverage.html
 test -s security-reports/schema-coverage.md
 ```
 
-### Step 6: Commit
+### Step 7: Commit
 
 ```bash
 git add security/schemathesis* security/requirements-project3.txt scripts/security/run-schemathesis* scripts/security/seed-token* .github/workflows/application-verification.yml .gitignore package.json
@@ -531,8 +535,11 @@ Before GitHub access it must:
 - validate SARIF 2.1.0;
 - verify every file digest and declared scanner tool/category against the complete Project 2 manifest;
 - require `complete: true`, default-branch workflow provenance, `master`, and one shared run ID/ref/head SHA across every required successful production scanner before allowing closure;
+- **fetch the current default-branch HEAD SHA via `gh api repos/{owner}/{repo}/branches/{branch}` and reject closure, reopening, updating, or creating any issue when `currentHeadSha !== manifest.headSha`** (proves no stale scan can mutate Issues after a newer commit lands);
 - reject fixture-marked input;
 - normalize/deduplicate current findings by fingerprint.
+
+Tests must prove the stale-head guard by feeding a manifest whose `headSha` differs from the live HEAD and asserting every `gh issue ...` invocation is a no-op (zero create/edit/reopen/close calls).
 
 ### Step 4: Add a thin `gh` adapter
 
