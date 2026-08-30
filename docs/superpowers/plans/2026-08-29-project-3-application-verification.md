@@ -341,7 +341,16 @@ The unit test injects `fetch` and proves:
 
 The workflow writes the token to a masked environment value using `::add-mask::` before any later command.
 
-### Step 3: Implement tracecov hook and runner
+### Step 3: Create schemathesis.toml config
+
+`security/schemathesis.toml` is an empty config file (all options are passed via CLI in the runner). This satisfies the Files surface while keeping all configuration in version-controlled CLI flags:
+
+```bash
+mkdir -p security
+printf '# Schemathesis configuration — all options passed via CLI flags\n' > security/schemathesis.toml
+```
+
+### Step 5: Implement tracecov hook and runner
 
 `security/schemathesis-hooks.py` contains only:
 
@@ -426,7 +435,7 @@ Job sequence:
 
 A setup/readiness/reset failure must fail the job, not produce a false clean result. Preserve API logs on failure, but sanitize with the existing redaction rules and never upload environment dumps.
 
-### Step 5: Validate locally
+### Step 6: Validate locally
 
 ```bash
 node --test scripts/security/run-schemathesis.test.mjs scripts/security/seed-token.test.mjs
