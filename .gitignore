@@ -4,6 +4,7 @@ dist/
 coverage/
 .env
 .env.local
+.local/
 supabase/.temp/
 supabase/.branches/
 supabase/signing_keys.json

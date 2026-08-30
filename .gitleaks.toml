@@ -11,7 +11,7 @@ title = "continuous-security-demo production"
 [extend]
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "Synthetic secrets in deterministic test fixtures (Task 5)."
 paths = [
   '''security/fixtures/''',
