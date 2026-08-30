@@ -285,15 +285,66 @@ function inspectFile(filePath, mutable, pinned) {
 // CLI entry point
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
-  
-  if (args.length === 0) {
-    console.error('Usage: check-action-pins.mjs <workflow-dir-or-file>...');
+  let output = null;
+  let reportFormat = null;
+  const paths = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--output') {
+      output = args[++i];
+    } else if (arg === '--report-format') {
+      reportFormat = args[++i];
+      if (reportFormat !== 'json') {
+        console.error(`Unsupported --report-format: ${reportFormat}`);
+        process.exit(2);
+      }
+    } else if (arg === '--help' || arg === '-h') {
+      console.error('Usage: check-action-pins.mjs [--output <file>] [--report-format json] <workflow-dir-or-file>...');
+      process.exit(0);
+    } else {
+      paths.push(arg);
+    }
+  }
+
+  if (paths.length === 0) {
+    console.error('Usage: check-action-pins.mjs [--output <file>] [--report-format json] <workflow-dir-or-file>...');
     process.exit(1);
   }
-  
-  const result = inspectWorkflowFiles(args);
-  
-  if (result.mutable.length > 0) {
+
+  const result = inspectWorkflowFiles(paths);
+
+  // --output writes JSON so other tools (the fixture inversion self-test)
+  // can read the same findings without re-parsing text. Mutable entries gain
+  // a stable `id` prefixed with `mutable-action-ref:` and `ruleId: mutable-action-ref`
+  // so the inversion check can match it as a SARIF-style rule ID.
+  if (output) {
+    const payload = {
+      mutable: result.mutable.map((item, index) => ({
+        id: `mutable-action-ref:${item.file}:${item.line}:${index}`,
+        ruleId: 'mutable-action-ref',
+        file: item.file,
+        line: item.line,
+        ref: item.ref,
+        message: item.message,
+      })),
+      pinned: result.pinned.map((item) => ({
+        id: `pinned-action:${item.file}:${item.line}`,
+        ruleId: 'pinned-action',
+        file: item.file,
+        line: item.line,
+        ref: item.ref,
+      })),
+    };
+    fs.mkdirSync(path.dirname(output), { recursive: true });
+    fs.writeFileSync(output, `${JSON.stringify(payload, null, 2)}\n`);
+    // Suppress text diagnostics when JSON is being captured; the caller
+    // typically wraps this in `|| true` for fixture scans that expect
+    // findings.
+    if (result.mutable.length > 0) {
+      process.exit(1);
+    }
+  } else if (result.mutable.length > 0) {
     console.error('Mutable action references found:');
     for (const item of result.mutable) {
       console.error(`  ${item.file}:${item.line} - ${item.ref}`);

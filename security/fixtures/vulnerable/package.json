@@ -1,0 +1,9 @@
+{
+  "name": "fixture-vulnerable",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Deterministic vulnerable fixture for the inversion self-test. Intentionally depends on minimist 0.0.8 so OSV-Scanner detects GHSA-xvch-5gv4-984h.",
+  "dependencies": {
+    "minimist": "0.0.8"
+  }
+}

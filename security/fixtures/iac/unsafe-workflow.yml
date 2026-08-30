@@ -1,0 +1,23 @@
+# Deliberately unsafe workflow fixture — DO NOT place under .github/workflows.
+#
+# This file exercises two scanners that the production tree must catch:
+#
+#   * check-action-pins.mjs: the unpinned `actions/checkout@v4` reference is
+#     a mutable external action ref.
+#   * checkov CKV_GHA_2: the `${{ github.event.issue.title }}` interpolation
+#     inside `run:` is a script-injection vector.
+#
+# The fixture lives under security/fixtures/iac/ so it never gets picked up
+# by the production-tree scanners.
+
+name: fixture-unsafe-workflow
+on:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Echo issue title (script-injection bait)
+        run: echo "${{ github.event.issue.title }}"

@@ -1,0 +1,140 @@
+# Fixture inversion self-test for the security stack.
+#
+# This workflow proves that the scanners configured by Project 2 still
+# detect the deliberately vulnerable fixtures planted under
+# security/fixtures/. Detections are EXPECTED; the gate is `assert-fixtures.mjs`
+# which exits 0 only when every required stable identifier is found.
+#
+# Hard constraints (verified by Task 5):
+#   * The unsafe workflow fixture MUST NOT be placed under .github/workflows
+#     (the action-ref checker would flag it as a real mutable reference).
+#   * Fixture SARIF MUST NEVER be uploaded to Code Scanning: this workflow
+#     requests only `contents: read`, and no SARIF upload step exists.
+#   * Fixture artifacts MUST NOT be part of `production-security-evidence`;
+#     the only artifact uploaded here is `fixture-security-evidence`.
+#   * The synthetic GitHub PAT in security/fixtures/secrets is run through
+#     Gitleaks with `--redact=100` so the value never reaches captured output.
+name: security-fixtures
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-fixtures-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixtures:
+    name: Fixture inversion self-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the commit under test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the pinned Checkov release
+        run: pip install -r security/requirements-project2.txt
+
+      - name: Install the pinned Gitleaks release
+        run: |
+          set -euo pipefail
+          bash scripts/security/install-gitleaks.sh .local/bin
+          echo "${PWD}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Scan the vulnerable fixture package
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+        with:
+          scan-args: |-
+            --format=sarif
+            --output=security-reports/fixture-osv.sarif
+            --lockfile=security/fixtures/vulnerable/package-lock.json
+
+      - name: Require an OSV report
+        run: |
+          set -euo pipefail
+          if [ ! -s security-reports/fixture-osv.sarif ]; then
+            echo "::error::osv-scanner produced no SARIF report"
+            exit 1
+          fi
+
+      - name: Scan the fixture secret
+        run: |
+          set -uo pipefail
+          mkdir -p security-reports
+          gitleaks detect --no-git --redact=100 --config security/gitleaks-fixture.toml \
+            --source security/fixtures/secrets \
+            --report-format sarif --report-path security-reports/fixture-gitleaks.sarif
+          status=$?
+          if [ "${status}" -ne 0 ] && [ "${status}" -ne 1 ]; then
+            echo "::error::gitleaks failed with exit ${status}"
+            exit "${status}"
+          fi
+          if [ ! -s security-reports/fixture-gitleaks.sarif ]; then
+            echo "::error::gitleaks produced no SARIF"
+            exit 1
+          fi
+
+      - name: Scan the fixture IaC
+        run: |
+          set -uo pipefail
+          mkdir -p security-reports
+          checkov -d security/fixtures/iac --output sarif --output-file-path security-reports/fixture-checkov.sarif --compact --soft-fail
+          if [ ! -s security-reports/fixture-checkov.sarif ]; then
+            echo "::error::checkov produced no SARIF"
+            exit 1
+          fi
+
+      - name: Run the action-ref checker on the fixture
+        run: |
+          mkdir -p security-reports
+          # Mutable refs are EXPECTED for the unsafe fixture; suppress the
+          # nonzero exit so the inversion check below can grade it.
+          node scripts/security/check-action-pins.mjs security/fixtures/iac \
+            --output security-reports/fixture-actions.json --report-format json || true
+
+      - name: Run the fixture inversion gate
+        run: |
+          set -euo pipefail
+          node scripts/security/assert-fixtures.mjs \
+            --osv security-reports/fixture-osv.sarif \
+            --gitleaks security-reports/fixture-gitleaks.sarif \
+            --checkov security-reports/fixture-checkov.sarif \
+            --actions security-reports/fixture-actions.json \
+            --requirements security/fixtures/vulnerable/expected-advisories.json \
+            --output security-reports/fixture-summary.json
+
+      - name: Upload the fixture evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fixture-security-evidence
+          path: |
+            security-reports/fixture-osv.sarif
+            security-reports/fixture-gitleaks.sarif
+            security-reports/fixture-checkov.sarif
+            security-reports/fixture-actions.json
+            security-reports/fixture-summary.json
+          retention-days: 30
+          if-no-files-found: warn

@@ -1,0 +1,8 @@
+{
+  "expected": [
+    "GHSA-xvch-5gv4-984h",
+    "github-pat",
+    "CKV_GHA_2",
+    "mutable-action-ref"
+  ]
+}
