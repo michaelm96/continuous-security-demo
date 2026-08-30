@@ -1,0 +1,10 @@
+{
+  "exceptions": [
+    {
+      "package": "caniuse-lite",
+      "version": "1.0.30001810",
+      "license": "CC-BY-4.0",
+      "rationale": "Browser-compatibility database (data, not software). CC-BY-4.0 requires only attribution; commercial/redistribution use is permitted and the README preserves the attribution."
+    }
+  ]
+}

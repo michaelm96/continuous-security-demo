@@ -103,6 +103,21 @@ function matchesAny(license, patterns) {
 }
 
 /**
+ * Extract a license string from a deprecated-style entry ({type: 'X'}).
+ * Returns the type string for objects with a string `type` field,
+ * or null if the entry cannot be normalized.
+ * @param {*} item
+ * @returns {string|null}
+ */
+function extractTypeFromLicenseEntry(item) {
+  if (typeof item === 'string') return item;
+  if (item !== null && typeof item === 'object' && typeof item.type === 'string') {
+    return item.type;
+  }
+  return null;
+}
+
+/**
  * Classify a license string
  * @param {string|Array|object} value - License value (string, array, or object)
  * @returns {{classification: string, source: string, isProduction: boolean}}
@@ -127,8 +142,37 @@ export function classifyLicense(value) {
         isProduction: true
       };
     }
-    // Object with licenses property
+    // Object with licenses property — handles deprecated {licenses: [...]} format
     if (value.licenses) {
+      if (Array.isArray(value.licenses)) {
+        if (value.licenses.length === 0) {
+          return {
+            classification: 'unknown',
+            source: 'empty-array',
+            isProduction: false
+          };
+        }
+        // Walk entries; pick restricted/non-commercial over the first permitted
+        for (const item of value.licenses) {
+          const licenseStr = extractTypeFromLicenseEntry(item);
+          if (licenseStr === null) continue;
+          const result = classifyLicense(licenseStr);
+          if (result.classification === 'restricted' || result.classification === 'non-commercial') {
+            return result;
+          }
+        }
+        // No restricted entries found — fall back to first entry
+        const first = value.licenses[0];
+        const firstStr = extractTypeFromLicenseEntry(first);
+        if (firstStr !== null) {
+          return classifyLicense(firstStr);
+        }
+        return {
+          classification: 'unknown',
+          source: 'empty-array',
+          isProduction: false
+        };
+      }
       return classifyLicense(value.licenses);
     }
     return {
@@ -149,13 +193,25 @@ export function classifyLicense(value) {
     }
     // For compound licenses, check if ANY is permitted/restricted
     for (const item of value) {
-      const result = classifyLicense(item);
+      const str = extractTypeFromLicenseEntry(item);
+      if (str === null) continue;
+      const result = classifyLicense(str);
       if (result.classification === 'restricted' || result.classification === 'non-commercial') {
         return result;
       }
     }
-    // All licenses in array
-    return classifyLicense(value[0]);
+    // All licenses in array — fall back to first valid entry
+    for (const item of value) {
+      const str = extractTypeFromLicenseEntry(item);
+      if (str !== null) {
+        return classifyLicense(str);
+      }
+    }
+    return {
+      classification: 'unknown',
+      source: 'empty-array',
+      isProduction: false
+    };
   }
   
   // Handle string input
@@ -213,18 +269,52 @@ export function classifyLicense(value) {
 }
 
 /**
+ * Load and validate per-package per-version exceptions from a JSON file.
+ * Each exception requires package, version, license, and rationale (>=20 chars).
+ * @param {string} filePath - Path to license-exceptions.json
+ * @returns {Array<{package: string, version: string, license: string, rationale: string}>}
+ */
+export function loadExceptions(filePath) {
+  if (!filePath) return [];
+  let raw;
+  try {
+    raw = fs.readFileSync(filePath, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
+  const parsed = JSON.parse(raw);
+  const list = Array.isArray(parsed.exceptions) ? parsed.exceptions : [];
+  for (const entry of list) {
+    if (!entry || typeof entry.package !== 'string' || typeof entry.version !== 'string') {
+      throw new Error(`Invalid exception entry (missing package/version): ${JSON.stringify(entry)}`);
+    }
+    if (typeof entry.rationale !== 'string' || entry.rationale.length < 20) {
+      throw new Error(`Exception rationale must be >= 20 chars for ${entry.package}@${entry.version}`);
+    }
+  }
+  return list;
+}
+
+/**
  * Evaluate a list of packages against license policy
  * @param {Array} packages - Array of package objects with name, version, license, dev
  * @param {string} scope - 'production' or 'development'
- * @returns {{blocked: Array, reported: Array}}
+ * @param {Array} exceptions - Per-package per-version exceptions with rationale
+ * @returns {{blocked: Array, reported: Array, exceptions: Array}}
  */
-export function evaluatePackages(packages, scope = 'production') {
+export function evaluatePackages(packages, scope = 'production', exceptions = []) {
   const blocked = [];
   const reported = [];
-  
+  const exceptionsApplied = [];
+
   for (const pkg of packages) {
-    const licenseResult = classifyLicense(pkg.license);
-    
+    // Forward deprecated {licenses: [{type:'X'}]} format when license field is missing
+    const licenseValue = (pkg.license !== undefined && pkg.license !== null)
+      ? pkg.license
+      : (pkg.licenses !== undefined ? { licenses: pkg.licenses } : pkg.license);
+    const licenseResult = classifyLicense(licenseValue);
+
     const entry = {
       name: pkg.name,
       version: pkg.version,
@@ -233,15 +323,32 @@ export function evaluatePackages(packages, scope = 'production') {
       source: licenseResult.source,
       dev: pkg.dev || false
     };
-    
+
+    // Check for matching exception (per-package per-version only)
+    const exception = exceptions.find(e =>
+      e.package === pkg.name && e.version === pkg.version
+    );
+    if (exception) {
+      exceptionsApplied.push({
+        name: pkg.name,
+        version: pkg.version,
+        license: pkg.license,
+        classification: licenseResult.classification,
+        kind: 'exception',
+        rationale: exception.rationale,
+        dev: pkg.dev || false
+      });
+      continue;
+    }
+
     if (licenseResult.classification === 'permitted') {
       // Permitted - no action needed
       continue;
     }
-    
+
     // For production dependencies, block anything not explicitly permitted
     if (scope === 'production' && !pkg.dev) {
-      if (licenseResult.classification === 'restricted' || 
+      if (licenseResult.classification === 'restricted' ||
           licenseResult.classification === 'non-commercial' ||
           licenseResult.classification === 'unknown') {
         blocked.push(entry);
@@ -251,8 +358,8 @@ export function evaluatePackages(packages, scope = 'production') {
       reported.push(entry);
     }
   }
-  
-  return { blocked, reported };
+
+  return { blocked, reported, exceptions: exceptionsApplied };
 }
 
 // CLI entry point
@@ -261,7 +368,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   let productionFile = null;
   let developmentFile = null;
   let outputFile = null;
-  
+  let exceptionsFile = 'security/license-exceptions.json';
+
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--production' && args[i + 1]) {
       productionFile = args[i + 1];
@@ -272,42 +380,51 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     } else if (args[i] === '--output' && args[i + 1]) {
       outputFile = args[i + 1];
       i++;
+    } else if (args[i] === '--exceptions' && args[i + 1]) {
+      exceptionsFile = args[i + 1];
+      i++;
     }
   }
-  
+
   try {
     const allBlocked = [];
     const allReported = [];
-    
+    const allExceptions = [];
+    const exceptions = loadExceptions(exceptionsFile);
+
     if (productionFile) {
       const prodPkgs = JSON.parse(fs.readFileSync(productionFile, 'utf8'));
-      const result = evaluatePackages(prodPkgs, 'production');
+      const result = evaluatePackages(prodPkgs, 'production', exceptions);
       allBlocked.push(...result.blocked.map(p => ({ ...p, scope: 'production' })));
       allReported.push(...result.reported.map(p => ({ ...p, scope: 'production' })));
+      allExceptions.push(...result.exceptions.map(p => ({ ...p, scope: 'production' })));
     }
-    
+
     if (developmentFile) {
       const devPkgs = JSON.parse(fs.readFileSync(developmentFile, 'utf8'));
-      const result = evaluatePackages(devPkgs, 'development');
+      const result = evaluatePackages(devPkgs, 'development', exceptions);
       allReported.push(...result.reported.map(p => ({ ...p, scope: 'development' })));
+      allExceptions.push(...result.exceptions.map(p => ({ ...p, scope: 'development' })));
     }
-    
+
     const summary = {
       blocked: allBlocked,
       reported: allReported,
+      exceptions: allExceptions,
       summary: {
         totalBlocked: allBlocked.length,
-        totalReported: allReported.length
+        totalReported: allReported.length,
+        totalExceptions: allExceptions.length
       }
     };
-    
+
     if (outputFile) {
       fs.writeFileSync(outputFile, JSON.stringify(summary, null, 2));
       console.log(`License policy report written to ${outputFile}`);
     } else {
       console.log(JSON.stringify(summary, null, 2));
     }
-    
+
     if (allBlocked.length > 0) {
       process.exit(1);
     }

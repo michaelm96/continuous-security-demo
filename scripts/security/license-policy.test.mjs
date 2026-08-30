@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyLicense, evaluatePackages } from './license-policy.mjs';
+import { classifyLicense, evaluatePackages, loadExceptions } from './license-policy.mjs';
 
 // Helper to create a package record similar to npm query output
-function pkg(name, version, license, isDev = false) {
+function pkg(name, version, license, isDev = false, licenses = undefined) {
   return {
     name,
     version,
     license,
-    dev: isDev
+    dev: isDev,
+    ...(licenses !== undefined ? { licenses } : {})
   };
 }
 
@@ -216,6 +217,35 @@ test('classifyLicense handles object with licenses array', () => {
   assert.equal(result.classification, 'permitted');
 });
 
+test('classifyLicense handles deprecated object with licenses:[{type:"MIT"}]', () => {
+  const result = classifyLicense({ licenses: [{ type: 'MIT', url: 'http://example/LICENSE' }] });
+  assert.equal(result.classification, 'permitted');
+});
+
+test('classifyLicense handles deprecated object with licenses:[{type:"Apache-2.0"}]', () => {
+  const result = classifyLicense({ licenses: [{ type: 'Apache-2.0', url: 'http://example/LICENSE' }] });
+  assert.equal(result.classification, 'permitted');
+});
+
+test('classifyLicense handles deprecated object with licenses:[{type:"GPL-3.0"}]', () => {
+  const result = classifyLicense({ licenses: [{ type: 'GPL-3.0', url: 'http://example/LICENSE' }] });
+  assert.equal(result.classification, 'restricted');
+});
+
+test('classifyLicense handles deprecated object with empty licenses array', () => {
+  const result = classifyLicense({ licenses: [] });
+  assert.equal(result.classification, 'unknown');
+});
+
+test('evaluatePackages permits busboy-style deprecated MIT licenses array', () => {
+  const packages = [
+    pkg('busboy', '1.6.0', undefined, false, [{ type: 'MIT', url: 'http://example/LICENSE' }])
+  ];
+  const result = evaluatePackages(packages, 'production');
+  assert.equal(result.blocked.length, 0);
+  assert.equal(result.reported.length, 0);
+});
+
 test('returns isProduction flag based on classification', () => {
   const permitted = classifyLicense('MIT');
   assert.equal(permitted.isProduction, true);
@@ -231,4 +261,46 @@ test('private packages with no license default to MIT', () => {
   const result = classifyLicense({ type: 'private', license: undefined });
   // Private packages without explicit license should be treated as MIT
   assert.equal(result.classification, 'permitted');
+});
+
+test('loadExceptions returns [] when file missing', () => {
+  const result = loadExceptions('/nonexistent/path/exceptions.json');
+  assert.deepEqual(result, []);
+});
+
+test('evaluatePackages applies per-package per-version exception', () => {
+  const packages = [
+    pkg('caniuse-lite', '1.0.30001810', 'CC-BY-4.0', false)
+  ];
+  const exceptions = [
+    {
+      package: 'caniuse-lite',
+      version: '1.0.30001810',
+      license: 'CC-BY-4.0',
+      rationale: 'Browser-compat database (data, not software) under attribution-only CC-BY-4.0; commercial use is permitted.'
+    }
+  ];
+  const result = evaluatePackages(packages, 'production', exceptions);
+  assert.equal(result.blocked.length, 0);
+  assert.equal(result.exceptions.length, 1);
+  assert.equal(result.exceptions[0].name, 'caniuse-lite');
+  assert.equal(result.exceptions[0].kind, 'exception');
+  assert.ok(result.exceptions[0].rationale.length >= 20);
+});
+
+test('evaluatePackages does not apply exception when version mismatches', () => {
+  const packages = [
+    pkg('caniuse-lite', '1.0.30001810', 'CC-BY-4.0', false)
+  ];
+  const exceptions = [
+    {
+      package: 'caniuse-lite',
+      version: '1.0.30001700',
+      license: 'CC-BY-4.0',
+      rationale: 'Browser-compat database (data, not software) under attribution-only CC-BY-4.0; commercial use is permitted.'
+    }
+  ];
+  const result = evaluatePackages(packages, 'production', exceptions);
+  assert.equal(result.blocked.length, 1);
+  assert.equal(result.exceptions.length, 0);
 });

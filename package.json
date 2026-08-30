@@ -30,5 +30,10 @@
   "devDependencies": {
     "@cyclonedx/cyclonedx-npm": "6.0.1",
     "supabase": "2.116.0"
+  },
+  "overrides": {
+    "next": {
+      "sharp": "0.32.6"
+    }
   }
 }
