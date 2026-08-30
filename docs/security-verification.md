@@ -45,7 +45,7 @@ workflow never uses `pull_request_target`.
 - `security/fixtures/secrets/github-token.txt` is a clearly synthetic
   invalid PAT; Gitleaks must match the `github-pat` rule and the value
   must never appear in any captured output thanks to `--redact=100`.
-- `security/fixtures/iac/unsafe-workflow.yml` contains a mutable
+- `security/fixtures/iac/.github/workflows/unsafe-workflow.yml` contains a mutable
   `actions/checkout@v4` reference and a `${{ github.event.issue.title }}`
   interpolation, so Checkov must detect `CKV_GHA_2` and the action-ref
   checker must flag the mutable ref.
@@ -162,3 +162,15 @@ The repository is mirrored at
 gate must be green before pushing. Workflow runs are visible at
 `https://github.com/michaelm96/continuous-security-demo/actions` and
 Code Scanning at `https://github.com/michaelm96/continuous-security-demo/security/code-scanning`.
+
+## Project 2 acceptance evidence
+
+Commit `e4d6cee8768ae5a21ad0a6cde50f9eff069d9ae8` passed both trusted
+workflows:
+
+- [`security-main` run 33326158646](https://github.com/michaelm96/continuous-security-demo/actions/runs/33326158646)
+- [`security-fixtures` run 33326158640](https://github.com/michaelm96/continuous-security-demo/actions/runs/33326158640)
+
+Local verification also passed all 196 security tests, validated all 54
+external Action references as immutable full SHAs, and found no leaks in
+the full Git history.
