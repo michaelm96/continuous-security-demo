@@ -1,0 +1,28 @@
+# Continuous Security Demo — production Gitleaks config.
+#
+# Extends the bundled default rules. Allows the six documented LocalOnly demo
+# passwords only at their seed/test/docs paths, and excludes only the synthetic
+# fixtures used by deterministic tests.
+#
+# No broad password, JWT, SUPABASE_*, or repository-wide allowlist exists here.
+
+title = "continuous-security-demo production"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic secrets in deterministic test fixtures (Task 5)."
+paths = [
+  '''security/fixtures/''',
+]
+
+[[allowlists]]
+description = "Documented LocalOnly-* demo passwords at exact seed/test paths."
+condition = "AND"
+paths = [
+  '''(supabase/seed\.sql|apps/api/test/helpers/seed-identities\.ts)''',
+]
+regexes = [
+  '''(LocalOnly-Admin1!|LocalOnly-Manager1!|LocalOnly-UserA1!|LocalOnly-UserB1!|LocalOnly-Suspended1!|LocalOnly-Admin2!)''',
+]

@@ -24,7 +24,8 @@
     "security:actions": "node scripts/security/check-action-pins.mjs .github/workflows",
     "security:sarif": "node scripts/security/sarif-policy.mjs --threshold 7",
     "security:licenses": "node scripts/security/license-policy.mjs",
-    "security:sbom": "cyclonedx-npm --output-file security-reports/sbom.cdx.json --output-format JSON --spec-version 1.6 --omit dev"
+    "security:sbom": "cyclonedx-npm --output-file security-reports/sbom.cdx.json --output-format JSON --spec-version 1.6 --omit dev",
+    "security:secrets": "gitleaks git --log-opts=--all --config .gitleaks.toml --redact=100 --report-format sarif --report-path security-reports/gitleaks.sarif"
   },
   "devDependencies": {
     "@cyclonedx/cyclonedx-npm": "6.0.1",

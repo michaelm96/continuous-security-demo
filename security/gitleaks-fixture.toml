@@ -1,0 +1,10 @@
+# Gitleaks config used by synthetic fixture scans (Task 5).
+#
+# Extends the bundled default rules WITHOUT inheriting the production
+# exclusion of security/fixtures/. Intentional — vulnerable fixtures
+# planted in security/fixtures/ must trigger detection here.
+
+title = "continuous-security-demo fixture"
+
+[extend]
+useDefault = true
