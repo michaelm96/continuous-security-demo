@@ -1,0 +1,332 @@
+# Deterministic security checks for pull requests.
+#
+# Every job is independent so a single failure never erases the evidence
+# produced by the others. Scanners emit reports; the tested policy scripts in
+# scripts/security decide what blocks. This workflow triggers on `pull_request`
+# only, never on the privileged target variant that runs untrusted code with a
+# writable token. Every job is limited to `contents: read`: no write scope of
+# any kind is granted, so a fork pull request needs no repository secret.
+name: security-pr
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Review newly introduced dependencies
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          license-check: true
+          # SPDX identifiers only: the action rejects wildcards. This mirrors
+          # the copyleft / source-available / non-commercial families denied by
+          # scripts/security/license-policy.mjs.
+          deny-licenses: >-
+            AGPL-1.0-only, AGPL-1.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later,
+            SSPL-1.0, BUSL-1.1, Elastic-2.0,
+            CC-BY-NC-1.0, CC-BY-NC-2.0, CC-BY-NC-2.5, CC-BY-NC-3.0, CC-BY-NC-4.0,
+            CC-BY-NC-SA-4.0, CC-BY-NC-ND-4.0
+
+  osv:
+    name: OSV vulnerability scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare the report directory
+        run: mkdir -p security-reports
+
+      # The reusable OSV workflow declares `security-events: write` on its own
+      # job, which a caller granting only `contents: read` may not satisfy, so
+      # the scanner action from the same pinned commit is used directly. The
+      # step never gates: findings are judged by the osv-policy job.
+      - name: Scan the production lockfile
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+        with:
+          scan-args: |-
+            --format=sarif
+            --output=security-reports/osv.sarif
+            --lockfile=package-lock.json
+
+      - name: Require an OSV report
+        run: |
+          set -euo pipefail
+          if [ ! -s security-reports/osv.sarif ]; then
+            echo "::error::osv-scanner produced no SARIF report"
+            exit 1
+          fi
+
+      - name: Retain the OSV report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: osv-report
+          path: security-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  osv-policy:
+    name: OSV severity policy
+    needs: [osv]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Download the OSV report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: osv-report
+          path: security-reports
+
+      - name: Apply the CVSS >= 7.0 policy
+        run: |
+          set -euo pipefail
+          # Only the production lockfile is scanned, so every finding is a
+          # production dependency. Unknown severities without a classification
+          # fail closed inside sarif-policy.mjs.
+          printf '%s\n' '{"package-lock.json":"production","./package-lock.json":"production"}' \
+            > security-reports/osv-classification.json
+          node scripts/security/sarif-policy.mjs \
+            --threshold 7 \
+            --classification security-reports/osv-classification.json \
+            --output security-reports/osv-policy.json \
+            security-reports/osv.sarif
+
+      - name: Retain the OSV policy verdict
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: osv-policy-report
+          path: security-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  gitleaks:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install the pinned Gitleaks release
+        run: |
+          set -euo pipefail
+          bash scripts/security/install-gitleaks.sh .local/bin
+          echo "${PWD}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Scan the full history for secrets
+        run: |
+          set -uo pipefail
+          mkdir -p security-reports
+          npm run security:secrets
+          status=$?
+          if [ ! -s security-reports/gitleaks.sarif ]; then
+            echo "::error::gitleaks produced no SARIF report"
+            exit 1
+          fi
+          # Exit 1 means "leaks found" and is judged by the policy step below;
+          # anything else is a scanner failure.
+          if [ "${status}" -ne 0 ] && [ "${status}" -ne 1 ]; then
+            echo "::error::gitleaks failed with exit code ${status}"
+            exit "${status}"
+          fi
+
+      - name: Block on any detected secret
+        run: |
+          set -euo pipefail
+          # Gitleaks emits no CVSS, so every finding lands in "unknown
+          # severity" and fails closed in sarif-policy.mjs.
+          node scripts/security/sarif-policy.mjs \
+            --threshold 7 \
+            --output security-reports/gitleaks-policy.json \
+            security-reports/gitleaks.sarif
+
+      - name: Retain the sanitized secret report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gitleaks-report
+          path: security-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  checkov:
+    name: Infrastructure and workflow scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the pinned Checkov release
+        run: pip install -r security/requirements-project2.txt
+
+      - name: Scan configuration surfaces
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          # --soft-fail keeps the scanner decoupled from the verdict: failed
+          # checks are judged by sarif-policy.mjs, crashes still exit nonzero.
+          checkov --config-file .checkov.yml --soft-fail
+          sarif="$(find security-reports -name 'results_sarif.sarif' -print -quit)"
+          if [ -z "${sarif}" ]; then
+            echo "::error::checkov produced no SARIF report"
+            exit 1
+          fi
+          cp "${sarif}" security-reports/checkov.sarif
+
+      - name: Apply the Checkov severity policy
+        run: |
+          set -euo pipefail
+          # --checkov blocks every finding that carries no severity, so a
+          # missing severity can never silently pass.
+          node scripts/security/sarif-policy.mjs \
+            --threshold 7 \
+            --checkov \
+            --output security-reports/checkov-policy.json \
+            security-reports/checkov.sarif
+
+      - name: Retain the Checkov report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: checkov-report
+          path: security-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  licenses-sbom:
+    name: License policy and SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install the locked dependency graph
+        run: npm ci --ignore-scripts
+
+      - name: Capture the production and development graphs
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          npm query '.prod' --json > security-reports/npm-production.json
+          npm query '.dev' --json > security-reports/npm-development.json
+
+      - name: Generate the CycloneDX SBOM
+        run: |
+          set -euo pipefail
+          npm run security:sbom
+          if [ ! -s security-reports/sbom.cdx.json ]; then
+            echo "::error::cyclonedx-npm produced no SBOM"
+            exit 1
+          fi
+
+      - name: Apply the license policy
+        run: |
+          set -euo pipefail
+          npm run security:licenses -- \
+            --production security-reports/npm-production.json \
+            --development security-reports/npm-development.json \
+            --output security-reports/license-policy.json
+
+      - name: Retain the license and SBOM evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: licenses-sbom-report
+          path: security-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  policy-tests:
+    name: Policy unit tests and action pinning
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install the locked dependency graph
+        run: npm ci --ignore-scripts
+
+      - name: Run the security policy tests
+        run: npm run security:test
+
+      - name: Require immutable action references
+        run: npm run security:actions

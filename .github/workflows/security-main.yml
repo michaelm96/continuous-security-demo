@@ -1,0 +1,526 @@
+# Deterministic production security evidence for the trusted default branch.
+#
+# Scanner execution is decoupled from the policy verdict:
+#   * scanner jobs (osv, gitleaks, checkov, licenses-sbom) fail only when a
+#     tool crashes or produces no report, never because of a finding;
+#   * policy-eval applies the tested evaluators and fails the workflow when the
+#     verdict is blocking;
+#   * manifest runs after every scanner completes, regardless of the verdict,
+#     and writes the completeness proof Project 3 depends on.
+#
+# The workflow token stays `contents: read`. Only the three SARIF publishing
+# jobs request `security-events: write`, and only when the run comes from the
+# default branch. No job is granted write access to issues.
+name: security-main
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-main-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  osv:
+    name: OSV vulnerability scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the commit under scan
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare the report directory
+        run: mkdir -p security-reports/versions security-reports/digests
+
+      # Findings must not fail this job: the verdict belongs to policy-eval.
+      - name: Scan the complete production lockfile
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+        with:
+          scan-args: |-
+            --format=sarif
+            --output=security-reports/osv.sarif
+            --lockfile=package-lock.json
+
+      - name: Record the OSV evidence
+        run: |
+          set -euo pipefail
+          if [ ! -s security-reports/osv.sarif ]; then
+            echo "::error::osv-scanner produced no SARIF report"
+            exit 1
+          fi
+          # Version is fixed by the pinned action commit above.
+          printf '%s\n' '2.5.1' > security-reports/versions/osv.txt
+          sha256sum security-reports/osv.sarif | cut -d ' ' -f 1 \
+            > security-reports/digests/osv.sha256
+
+      - name: Retain the OSV report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: osv-report
+          path: security-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  gitleaks:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the pinned Gitleaks release
+        run: |
+          set -euo pipefail
+          bash scripts/security/install-gitleaks.sh .local/bin
+          echo "${PWD}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Scan the full history for secrets
+        run: |
+          set -uo pipefail
+          mkdir -p security-reports/versions security-reports/digests
+          # security:secrets already passes --log-opts=--all --redact=100.
+          npm run security:secrets
+          status=$?
+          if [ ! -s security-reports/gitleaks.sarif ]; then
+            echo "::error::gitleaks produced no SARIF report"
+            exit 1
+          fi
+          # Exit 1 means "leaks found" and is judged by policy-eval; any other
+          # nonzero code is a scanner failure.
+          if [ "${status}" -ne 0 ] && [ "${status}" -ne 1 ]; then
+            echo "::error::gitleaks failed with exit code ${status}"
+            exit "${status}"
+          fi
+
+      - name: Record the Gitleaks evidence
+        run: |
+          set -euo pipefail
+          gitleaks version > security-reports/versions/gitleaks.txt
+          sha256sum security-reports/gitleaks.sarif | cut -d ' ' -f 1 \
+            > security-reports/digests/gitleaks.sha256
+
+      - name: Retain the sanitized secret report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gitleaks-report
+          path: security-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  checkov:
+    name: Infrastructure and workflow scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the commit under scan
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the pinned Checkov release
+        run: pip install -r security/requirements-project2.txt
+
+      - name: Scan configuration surfaces
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports/versions security-reports/digests
+          # --soft-fail keeps findings out of the scanner exit code; a crash
+          # still exits nonzero and leaves no SARIF behind.
+          checkov --config-file .checkov.yml --soft-fail
+          sarif="$(find security-reports -name 'results_sarif.sarif' -print -quit)"
+          if [ -z "${sarif}" ]; then
+            echo "::error::checkov produced no SARIF report"
+            exit 1
+          fi
+          cp "${sarif}" security-reports/checkov.sarif
+          checkov --version > security-reports/versions/checkov.txt
+          sha256sum security-reports/checkov.sarif | cut -d ' ' -f 1 \
+            > security-reports/digests/checkov.sha256
+
+      - name: Retain the Checkov report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: checkov-report
+          path: security-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  licenses-sbom:
+    name: License policy and SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the commit under scan
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install the locked dependency graph
+        run: npm ci --ignore-scripts
+
+      - name: Capture the production and development graphs
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports/versions security-reports/digests
+          npm query '.prod' --json > security-reports/npm-production.json
+          npm query '.dev' --json > security-reports/npm-development.json
+
+      - name: Evaluate the locked license graph
+        run: |
+          set -uo pipefail
+          # A restricted license is a policy verdict, not a scanner failure, so
+          # the nonzero exit is tolerated here and re-applied by policy-eval.
+          # license-policy.mjs writes its report before exiting, so a missing
+          # report still means the evaluator itself failed.
+          npm run security:licenses -- \
+            --production security-reports/npm-production.json \
+            --development security-reports/npm-development.json \
+            --output security-reports/license-policy.json
+          if [ ! -s security-reports/license-policy.json ]; then
+            echo "::error::license-policy.mjs produced no report"
+            exit 1
+          fi
+
+      - name: Generate the CycloneDX SBOM
+        run: |
+          set -euo pipefail
+          npm run security:sbom
+          if [ ! -s security-reports/sbom.cdx.json ]; then
+            echo "::error::cyclonedx-npm produced no SBOM"
+            exit 1
+          fi
+
+      - name: Record the license and SBOM evidence
+        run: |
+          set -euo pipefail
+          node -p "require('./package.json').devDependencies['@cyclonedx/cyclonedx-npm']" \
+            > security-reports/versions/cyclonedx.txt
+          sha256sum security-reports/license-policy.json | cut -d ' ' -f 1 \
+            > security-reports/digests/licenses.sha256
+          sha256sum security-reports/sbom.cdx.json | cut -d ' ' -f 1 \
+            > security-reports/digests/sbom.sha256
+
+      - name: Retain the license and SBOM evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: licenses-sbom-report
+          path: security-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  policy-eval:
+    name: Policy evaluation
+    needs: [osv, gitleaks, checkov, licenses-sbom]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the commit under scan
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Download every scanner report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+
+      - name: Assemble the report set
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          for artifact in osv-report gitleaks-report checkov-report licenses-sbom-report; do
+            if [ -d "artifacts/${artifact}" ]; then
+              cp -R "artifacts/${artifact}/." security-reports/
+            fi
+          done
+          ls -R security-reports
+
+      - name: Apply the severity and license policies
+        run: |
+          set -uo pipefail
+          printf '%s\n' '{"package-lock.json":"production","./package-lock.json":"production"}' \
+            > security-reports/osv-classification.json
+          verdict=0
+          node scripts/security/sarif-policy.mjs \
+            --threshold 7 \
+            --classification security-reports/osv-classification.json \
+            --output security-reports/osv-policy.json \
+            security-reports/osv.sarif || verdict=1
+          node scripts/security/sarif-policy.mjs \
+            --threshold 7 \
+            --output security-reports/gitleaks-policy.json \
+            security-reports/gitleaks.sarif || verdict=1
+          node scripts/security/sarif-policy.mjs \
+            --threshold 7 \
+            --checkov \
+            --output security-reports/checkov-policy.json \
+            security-reports/checkov.sarif || verdict=1
+          node scripts/security/license-policy.mjs \
+            --production security-reports/npm-production.json \
+            --development security-reports/npm-development.json \
+            --output security-reports/license-policy.json || verdict=1
+          if [ "${verdict}" -ne 0 ]; then
+            echo "::error::production security policy verdict: blocking"
+          fi
+          exit "${verdict}"
+
+      - name: Retain the policy verdicts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: policy-evaluation
+          path: security-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  manifest:
+    name: Production evidence manifest
+    # No success() requirement: the manifest must record an incomplete run just
+    # as faithfully as a complete one, and policy-eval must not gate it.
+    needs: [osv, gitleaks, checkov, licenses-sbom]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the commit under scan
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Download every scanner report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+
+      - name: Assemble the report set
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          for artifact in osv-report gitleaks-report checkov-report licenses-sbom-report; do
+            if [ -d "artifacts/${artifact}" ]; then
+              cp -R "artifacts/${artifact}/." security-reports/
+            fi
+          done
+
+      - name: Recompute the policy verdict for the manifest
+        run: |
+          set -uo pipefail
+          # Recomputed here rather than taken from policy-eval so the manifest
+          # never depends on that job's result. A blocking verdict exits 1 and
+          # is expected; a missing report simply leaves no summary behind and
+          # is caught as incomplete evidence below.
+          printf '%s\n' '{"package-lock.json":"production","./package-lock.json":"production"}' \
+            > security-reports/osv-classification.json
+          node scripts/security/sarif-policy.mjs --threshold 7 \
+            --classification security-reports/osv-classification.json \
+            --output security-reports/osv-policy.json \
+            security-reports/osv.sarif || true
+          node scripts/security/sarif-policy.mjs --threshold 7 \
+            --output security-reports/gitleaks-policy.json \
+            security-reports/gitleaks.sarif || true
+          node scripts/security/sarif-policy.mjs --threshold 7 --checkov \
+            --output security-reports/checkov-policy.json \
+            security-reports/checkov.sarif || true
+          exit 0
+
+      - name: Write the production manifest
+        id: manifest
+        continue-on-error: true
+        env:
+          OSV_RESULT: ${{ needs.osv.result }}
+          GITLEAKS_RESULT: ${{ needs.gitleaks.result }}
+          CHECKOV_RESULT: ${{ needs.checkov.result }}
+          LICENSES_RESULT: ${{ needs.licenses-sbom.result }}
+        run: |
+          set -euo pipefail
+          args=()
+          for tool in osv gitleaks checkov cyclonedx; do
+            file="security-reports/versions/${tool}.txt"
+            if [ -s "${file}" ]; then
+              args+=(--tool-version "${tool}=$(head -n 1 "${file}" | tr -d '\r')")
+            fi
+          done
+          # Digests are declared by the job that produced each report, so a
+          # report altered between upload and download fails verification.
+          for tool in osv gitleaks checkov licenses sbom; do
+            file="security-reports/digests/${tool}.sha256"
+            if [ -s "${file}" ]; then
+              args+=(--digest "${tool}=$(cut -d ' ' -f 1 "${file}" | tr -d '\r')")
+            fi
+          done
+          for file in security-reports/osv-policy.json \
+                      security-reports/gitleaks-policy.json \
+                      security-reports/checkov-policy.json \
+                      security-reports/license-policy.json; do
+            if [ -s "${file}" ]; then
+              args+=(--policy "${file}")
+            fi
+          done
+          node scripts/security/write-scan-manifest.mjs \
+            --output security-reports/production-manifest.json \
+            --report osv=security-reports/osv.sarif \
+            --report gitleaks=security-reports/gitleaks.sarif \
+            --report checkov=security-reports/checkov.sarif \
+            --report licenses=security-reports/license-policy.json \
+            --report sbom=security-reports/sbom.cdx.json \
+            --status "osv=${OSV_RESULT}" \
+            --status "gitleaks=${GITLEAKS_RESULT}" \
+            --status "checkov=${CHECKOV_RESULT}" \
+            --status "licenses=${LICENSES_RESULT}" \
+            --status "sbom=${LICENSES_RESULT}" \
+            "${args[@]}"
+
+      - name: Upload the production security evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-security-evidence
+          path: |
+            security-reports/osv.sarif
+            security-reports/gitleaks.sarif
+            security-reports/checkov.sarif
+            security-reports/license-policy.json
+            security-reports/sbom.cdx.json
+            security-reports/production-manifest.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Fail when the evidence is incomplete
+        if: steps.manifest.outcome == 'failure'
+        run: |
+          echo "::error::production security evidence is incomplete"
+          exit 1
+
+  osv-upload-sarif:
+    name: Publish OSV SARIF
+    needs: [osv]
+    # Publishing is limited to the default branch so a manual dispatch from any
+    # other ref stays read-only.
+    if: >-
+      needs.osv.result == 'success' &&
+      github.ref == 'refs/heads/master' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out the commit under scan
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the OSV report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: osv-report
+          path: security-reports
+
+      - name: Upload the OSV SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: security-reports/osv.sarif
+          category: osv-production
+
+  gitleaks-upload-sarif:
+    name: Publish Gitleaks SARIF
+    needs: [gitleaks]
+    if: >-
+      needs.gitleaks.result == 'success' &&
+      github.ref == 'refs/heads/master' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out the commit under scan
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the Gitleaks report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: gitleaks-report
+          path: security-reports
+
+      - name: Upload the Gitleaks SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: security-reports/gitleaks.sarif
+          category: gitleaks-production
+
+  checkov-upload-sarif:
+    name: Publish Checkov SARIF
+    needs: [checkov]
+    if: >-
+      needs.checkov.result == 'success' &&
+      github.ref == 'refs/heads/master' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out the commit under scan
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the Checkov report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: checkov-report
+          path: security-reports
+
+      - name: Upload the Checkov SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: security-reports/checkov.sarif
+          category: checkov-production

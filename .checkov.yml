@@ -1,0 +1,28 @@
+# Checkov scope for the production tree.
+#
+# The directory list is explicit on purpose: scanning `.` would pull in
+# node_modules and the deliberately vulnerable fixtures under
+# security/fixtures, which belong to the separate fixture workflow and must
+# never contribute to production evidence.
+directory:
+  - .github
+  - supabase
+  - apps
+skip-path:
+  - node_modules
+  - security/fixtures
+  - security-reports
+output:
+  - cli
+  - sarif
+output-file-path: security-reports/checkov
+compact: true
+download-external-modules: false
+skip-download: true
+skip-check:
+  # CKV_GHA_3 "Suspicious use of curl with secrets": no workflow in this
+  # repository passes a secret to curl. The only curl invocation lives in
+  # scripts/security/install-gitleaks.sh, which downloads a public release
+  # over HTTPS and verifies a pinned SHA-256 digest before extracting it.
+  # Remove this skip the moment a workflow starts calling curl directly.
+  - CKV_GHA_3
