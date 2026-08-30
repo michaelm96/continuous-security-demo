@@ -186,11 +186,12 @@ Use exactly:
 ```ts
 export type Actor =
   | 'anonymous'
-  | 'userA'
-  | 'managerA'
-  | 'adminA'
-  | 'suspendedA'
-  | 'adminB';
+  | 'alphaUserA'
+  | 'alphaManager'
+  | 'alphaAdmin'
+  | 'alphaSuspended'
+  | 'alphaUserB'
+  | 'betaAdmin';
 
 export interface AuthorizationCase {
   actor: Actor;
@@ -427,7 +428,7 @@ Job sequence:
 8. run `npm run security:inventory`;
 9. run the exact authorization-matrix suite;
 10. reset the disposable database so authorization mutations cannot affect fuzzing;
-11. obtain/mask a fresh `adminA` token;
+11. obtain/mask a fresh `alphaAdmin` token;
 12. choose fixed seed `20260829` for PR/push, manual input when supplied, and a generated numeric seed for schedule; write it to the job summary and `security-reports/schemathesis-seed.txt`;
 13. run `run-schemathesis.sh` with the examples phase plus PR max examples `25` and scheduled max examples `100`; assert its coverage report records at least one 2xx example for every operation and that generated traffic is not dominated by `404` or `429`;
 14. upload all reports with `if: always()`;
@@ -448,7 +449,7 @@ npm run security:inventory
 npm run security:authorization
 uv venv .venv-security
 uv pip install --python .venv-security/bin/python -r security/requirements-project3.txt
-PATH="$PWD/.venv-security/bin:$PATH" AUTH_TOKEN="$(node scripts/security/seed-token.mjs adminA)" \
+PATH="$PWD/.venv-security/bin:$PATH" AUTH_TOKEN="$(node scripts/security/seed-token.mjs alphaAdmin)" \
   SEED=20260829 MAX_EXAMPLES=10 \
   bash scripts/security/run-schemathesis.sh
 
@@ -636,7 +637,7 @@ npm run security:secrets
 npm run security:authorization
 # Start live API, then:
 npm run security:inventory
-SEED=20260829 MAX_EXAMPLES=25 AUTH_TOKEN="$(node scripts/security/seed-token.mjs adminA)" \
+SEED=20260829 MAX_EXAMPLES=25 AUTH_TOKEN="$(node scripts/security/seed-token.mjs alphaAdmin)" \
   bash scripts/security/run-schemathesis.sh
 npm run supabase:stop
 git diff --check

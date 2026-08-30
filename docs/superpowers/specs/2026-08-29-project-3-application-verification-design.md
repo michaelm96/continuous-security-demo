@@ -84,7 +84,7 @@ interface EndpointAuthorizationPolicy {
 }
 
 interface AuthorizationCase {
-  actor: 'anonymous' | 'userA' | 'managerA' | 'adminA' | 'suspendedA' | 'adminB';
+  actor: 'anonymous' | 'alphaUserA' | 'alphaManager' | 'alphaAdmin' | 'alphaSuspended' | 'alphaUserB' | 'betaAdmin';
   resourceTenant: 'alpha' | 'beta' | 'none';
   ownership: 'owner' | 'non_owner' | 'not_applicable';
   expectedStatus: number;
@@ -104,7 +104,12 @@ The matrix must cover, where applicable:
 - known same-tenant insufficient-role behavior;
 - public health behavior.
 
-Expected statuses preserve the Project 1 contract:
+Expected statuses preserve the Project 1 contract, with two explicit exceptions already proven by Project 1:
+
+- `/me` returns `200` for any verified identity. Suspended callers receive `200` with empty `organizations` because `memberships_select_self` is active-only. The matrix asserts the suspended case explicitly.
+- `/organizations` returns `200 []` for suspended callers (not `403`) because the Supabase select returns zero rows under RLS. The matrix asserts `status 200` with empty body.
+
+Standard expectations otherwise:
 
 - unauthenticated: `401`;
 - known same-tenant insufficient role: `403`;
@@ -227,7 +232,7 @@ Focused automated tests must prove:
 - every live operation has exactly one matrix entry;
 - stale, duplicate, or missing entries fail;
 - invalid scenario or actor names fail before network traffic;
-- the five authenticated actor aliases obtain real tokens while the anonymous alias remains tokenless;
+- the six authenticated actor aliases obtain real tokens while the anonymous alias remains tokenless;
 - authorization cases exercise NestJS and return their exact expected statuses;
 - cross-tenant cases preserve `404` existence hiding;
 - every operation has at least one seeded successful fuzz path and bounded fuzzing is not dominated by `404` or `429`;
