@@ -244,15 +244,25 @@ export function inspectWorkflowFiles(paths) {
 
 function findYamlFiles(dir) {
   const results = [];
-  
+
   try {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
-    
+
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
-      
+
       if (entry.isDirectory()) {
-        if (!entry.name.startsWith('.') && entry.name !== 'node_modules') {
+        // Descend into every non-noise directory. The walker historically
+        // skipped every `.`-prefixed directory; `.github` is now opted back
+        // in so the recursive walker can find fixtures under
+        // `security/fixtures/iac/.github/workflows/`. Production trees
+        // (`<repo>/.github/workflows/*.yml`) still work because `.github`
+        // is descended into; OS / VCS / build-tool metadata dirs like
+        // `.git`, `.next`, `.cache`, and `.husky` remain skipped.
+        const skip =
+          entry.name === 'node_modules' ||
+          (entry.name.startsWith('.') && entry.name !== '.github');
+        if (!skip) {
           results.push(...findYamlFiles(fullPath));
         }
       } else if (isYamlFile(entry.name)) {
@@ -262,7 +272,7 @@ function findYamlFiles(dir) {
   } catch {
     // Ignore permission errors
   }
-  
+
   return results;
 }
 

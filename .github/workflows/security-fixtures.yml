@@ -101,9 +101,36 @@ jobs:
 
       - name: Scan the fixture IaC
         run: |
-          set -uo pipefail
+          set -euo pipefail
           mkdir -p security-reports
-          checkov -d security/fixtures/iac --output sarif --output-file-path security-reports/fixture-checkov.sarif --compact --soft-fail
+          # Checkov 3.3.16 GitHub Actions discovery requires an absolute
+          # scan root: with the relative `-d security/fixtures/iac` the
+          # framework emits zero rules (CKV_GHA_2 / CKV2_GHA_1 go missing).
+          # `${PWD}` at this point in the runner step is the repo root that
+          # `actions/checkout` just populated, so `"${PWD}/security/fixtures/iac"`
+          # is the absolute scan root Checkov needs to discover the fixture
+          # at `security/fixtures/iac/.github/workflows/unsafe-workflow.yml`.
+          # The fixture step also runs from the repo root, so Checkov loads
+          # the repo-root `.checkov.yml` and inherits its
+          # `skip-path: security/fixtures` entry; without overriding the
+          # inherited skip list, the relative walk matches that skip and
+          # emits zero rules (CKV_GHA_2 / CKV2_GHA_1 go missing). Pin
+          # `--framework github_actions` to keep Checkov on the GitHub
+          # Actions scanner (the default walk would also discover
+          # Kubernetes/Dockerfile/etc. and inherit unrelated skip-path
+          # matches), and reset the inherited skip list with
+          # `--skip-path '^$'` so no path is skipped.
+          # Checkov 3.3.16 also treats --output-file-path as a directory and
+          # writes `results_sarif.sarif` inside it; pass the directory, locate
+          # the file Checkov actually generated, then copy it to the stable
+          # path the downstream inversion gate consumes.
+          checkov -d "${PWD}/security/fixtures/iac" --framework github_actions --skip-path '^$' --output sarif --output-file-path security-reports --compact --soft-fail
+          sarif="$(find security-reports -name 'results_sarif.sarif' -print -quit)"
+          if [ -z "${sarif}" ]; then
+            echo "::error::checkov produced no SARIF report"
+            exit 1
+          fi
+          cp "${sarif}" security-reports/fixture-checkov.sarif
           if [ ! -s security-reports/fixture-checkov.sarif ]; then
             echo "::error::checkov produced no SARIF"
             exit 1

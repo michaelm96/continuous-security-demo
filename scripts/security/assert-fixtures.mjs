@@ -194,7 +194,15 @@ function readSarifResults(filePath) {
         result && result.properties && typeof result.properties === 'object'
           ? result.properties
           : {};
-      results.push({ ruleId: result.ruleId || '', props });
+      // Retain `message.text` so callers that need to scan for structured
+      // identifiers inside the human-readable message (see `readOsvResults`
+      // for the GHSA-alias extraction that satisfies stable-id requirements
+      // osv-scanner reports inside `message` rather than `ruleId`) can use it.
+      const message =
+        result && result.message && typeof result.message.text === 'string'
+          ? result.message.text
+          : '';
+      results.push({ ruleId: result.ruleId || '', props, message });
     }
   }
   return results;
@@ -209,7 +217,30 @@ function readSarifResults(filePath) {
  * @returns {Array<{id: string}>}
  */
 function readOsvResults(filePath) {
-  return readSarifResults(filePath).map((entry) => ({ id: entry.ruleId }));
+  // OSV-Scanner 2.5.1 SARIF uses the CVE primary as `result.ruleId` and the
+  // GHSA alias inside `result.message.text` in the exact shape
+  // `Package 'name@version' is vulnerable to 'CVE-...' (also known as 'GHSA-...')`.
+  // The requirements file intentionally names the stable GHSA alias, so the
+  // SARIF `message` must be retained and scanned for `GHSA-[A-Za-z0-9-]+`
+  // tokens; only those are promoted to evidence IDs (arbitrary message text
+  // would loosen matching).
+  const GHSA_REGEX = /GHSA-[A-Za-z0-9-]+/g;
+  const entries = [];
+  for (const entry of readSarifResults(filePath)) {
+    const ruleId = entry.ruleId;
+    if (ruleId) entries.push({ id: ruleId });
+    if (entry.message) {
+      const seen = new Set();
+      for (const match of entry.message.matchAll(GHSA_REGEX)) {
+        const alias = match[0];
+        if (!seen.has(alias)) {
+          seen.add(alias);
+          entries.push({ id: alias });
+        }
+      }
+    }
+  }
+  return entries;
 }
 
 /**

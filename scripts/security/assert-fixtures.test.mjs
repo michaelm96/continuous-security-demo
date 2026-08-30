@@ -330,3 +330,80 @@ test('CLI accepts an action JSON without an explicit id and synthesizes one', ()
   assert.equal(status, 0, 'synthesized id should still start with mutable-action-ref:');
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------------------
+// OSV SARIF alias extraction from result.message (run 33320910062)
+// ---------------------------------------------------------------------------
+
+// Regression guard for GitHub Actions run 33320910062: osv-scanner 2.5.1
+// emits the advisory's GHSA alias inside `result.message.text` rather than
+// `result.ruleId`, so an inversion check that only reads `ruleId` cannot
+// satisfy a requirement that names the GHSA. The CLI must extract
+// `GHSA-[A-Za-z0-9-]+` aliases from the message and expose them as
+// additional OSV evidence IDs alongside the primary ruleId.
+test('CLI exits 0 when the OSV requirement is satisfied by a GHSA alias extracted from result.message (not ruleId)', () => {
+  const files = allReportsPresent();
+  // Mirror the real OSV SARIF: ruleId is the CVE primary, the GHSA alias
+  // appears inside the message text in the exact format osv-scanner uses.
+  files['security-reports/fixture-osv.sarif'] = sarifWith([
+    {
+      ruleId: 'CVE-2020-7598',
+      message: {
+        text: "Package 'minimist@0.0.8' is vulnerable to 'CVE-2020-7598' (also known as 'GHSA-vh95-rmgr-6w4m').",
+      },
+    },
+    {
+      ruleId: 'CVE-2021-44906',
+      message: {
+        text: "Package 'minimist@0.0.8' is vulnerable to 'CVE-2021-44906' (also known as 'GHSA-xvch-5gv4-984h').",
+      },
+    },
+  ]);
+  const dir = makeWorkspace(files);
+  const { status, stdout, stderr } = runCli(dir);
+  assert.equal(status, 0, `stdout=${stdout} stderr=${stderr}`);
+  const summary = JSON.parse(
+    fs.readFileSync(join(dir, 'security-reports', 'fixture-summary.json'), 'utf8'),
+  );
+  assert.equal(summary.ok, true);
+  assert.ok(
+    summary.detected.includes('GHSA-xvch-5gv4-984h'),
+    `GHSA alias must satisfy the OSV requirement: ${JSON.stringify(summary.detected)}`,
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Guard against the alias extractor accepting arbitrary message text. Only
+// strings that match the strict `GHSA-[A-Za-z0-9-]+` shape are promoted to
+// evidence IDs; bare words or non-GHSA tokens must not appear as ids.
+test('CLI does not promote arbitrary message tokens to OSV evidence IDs', () => {
+  const files = allReportsPresent();
+  // Same shape as the real OSV SARIF plus an extra non-GHSA token in the
+  // message; only the GHSA alias should reach the evidence set.
+  files['security-reports/fixture-osv.sarif'] = sarifWith([
+    {
+      ruleId: 'CVE-2021-44906',
+      message: {
+        text: "Package 'minimist@0.0.8' is vulnerable to 'CVE-2021-44906' (also known as 'GHSA-xvch-5gv4-984h') [see also CVE-9999-0000].",
+      },
+    },
+  ]);
+  const dir = makeWorkspace(files);
+  const { status } = runCli(dir);
+  assert.equal(status, 0);
+  const summary = JSON.parse(
+    fs.readFileSync(join(dir, 'security-reports', 'fixture-summary.json'), 'utf8'),
+  );
+  // GHSA alias satisfies the OSV requirement; the unrelated CVE-9999-0000
+  // must NOT be promoted (it is not a GHSA and not the ruleId), and the
+  // ruleId CVE-2021-44906 reaches `extras` (it is not in the expected list)
+  // but does not block the gate.
+  assert.ok(summary.detected.includes('GHSA-xvch-5gv4-984h'));
+  assert.ok(summary.extra.includes('CVE-2021-44906'));
+  assert.ok(
+    !summary.detected.includes('CVE-9999-0000') &&
+      !summary.extra.includes('CVE-9999-0000'),
+    'CVE-9999-0000 is neither a GHSA alias nor the ruleId and must not leak',
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+});
